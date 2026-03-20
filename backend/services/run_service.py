@@ -1,0 +1,469 @@
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from uuid import UUID
+
+from azure.storage.blob import BlobServiceClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from backend.config import settings
+from backend.models.bank import BankStatementHeader, BankStatementLine
+from backend.models.core import BlobObject, IngestionRun, Tenant
+from backend.models.enums import MatchStatus, RunStatus, SourceType
+from backend.models.journal import JournalEntryHeader, JournalEntryLine
+from backend.models.reconciliation import MatchActionAudit, ReconciliationMatch
+from backend.models.remittance import RemittanceAdviceHeader, RemittanceAdviceLine
+from backend.schemas.api import MatchActionResponse
+from backend.services.matching_service import generate_match_candidates
+from backend.services.parsing_service import parse_bank_statement, parse_remittance
+from backend.utils.blob import build_blob_prefix, sha256_bytes
+
+
+class ServiceError(Exception):
+    pass
+
+
+def _ensure_tenant(db: Session, tenant_code: str) -> Tenant:
+    tenant = db.scalar(select(Tenant).where(Tenant.code == tenant_code))
+    if tenant:
+        return tenant
+    tenant = Tenant(code=tenant_code, name=tenant_code.replace('-', ' ').title(), is_active=True)
+    db.add(tenant)
+    db.flush()
+    return tenant
+
+
+def _get_blob(client: BlobServiceClient, container_name: str, prefix: str, suffix: str) -> tuple[str, bytes]:
+    container = client.get_container_client(container_name)
+    candidates = [b for b in container.list_blobs(name_starts_with=prefix) if b.name.lower().endswith(suffix)]
+    if not candidates:
+        raise ServiceError(f'No blob found under prefix={prefix} for suffix={suffix}')
+    chosen = sorted(candidates, key=lambda b: b.last_modified or datetime.min, reverse=True)[0]
+    data = container.download_blob(chosen.name).readall()
+    return chosen.name, data
+
+
+def _upsert_blob_object(
+    db: Session,
+    tenant: Tenant,
+    source_type: SourceType,
+    business_date,
+    blob_path: str,
+    payload: bytes,
+) -> BlobObject:
+    content_hash = sha256_bytes(payload)
+    existing = db.scalar(
+        select(BlobObject).where(
+            BlobObject.tenant_id == tenant.id,
+            BlobObject.source_type == source_type,
+            BlobObject.business_date == business_date,
+            BlobObject.content_hash == content_hash,
+        )
+    )
+    if existing:
+        return existing
+
+    blob_obj = BlobObject(
+        tenant_id=tenant.id,
+        source_type=source_type,
+        business_date=business_date,
+        container_name=settings.azure_raw_container,
+        blob_path=blob_path,
+        content_hash=content_hash,
+        size_bytes=len(payload),
+    )
+    db.add(blob_obj)
+    db.flush()
+    return blob_obj
+
+
+def _create_run_if_needed(db: Session, tenant: Tenant, business_date, bank_blob: BlobObject, rem_blob: BlobObject) -> IngestionRun:
+    existing = db.scalar(
+        select(IngestionRun)
+        .where(
+            IngestionRun.tenant_id == tenant.id,
+            IngestionRun.business_date == business_date,
+            IngestionRun.bank_blob_id == bank_blob.id,
+            IngestionRun.remittance_blob_id == rem_blob.id,
+        )
+        .order_by(IngestionRun.started_at.desc())
+    )
+    if existing and existing.status in {RunStatus.POSTED, RunStatus.READY_TO_POST, RunStatus.REVIEW_REQUIRED}:
+        return existing
+
+    run = IngestionRun(
+        tenant_id=tenant.id,
+        business_date=business_date,
+        status=RunStatus.RECEIVED,
+        bank_blob_id=bank_blob.id,
+        remittance_blob_id=rem_blob.id,
+    )
+    db.add(run)
+    db.flush()
+    return run
+
+
+def _persist_bank_data(db: Session, blob_object: BlobObject, payload: bytes) -> list[BankStatementLine]:
+    existing_header = db.scalar(
+        select(BankStatementHeader).where(BankStatementHeader.blob_object_id == blob_object.id)
+    )
+    if existing_header:
+        return list(existing_header.lines)
+
+    header_data, line_data = parse_bank_statement(payload)
+    header = BankStatementHeader(blob_object_id=blob_object.id, source_file_name=blob_object.blob_path, **header_data)
+    db.add(header)
+    db.flush()
+
+    lines: list[BankStatementLine] = []
+    for row in line_data:
+        line = BankStatementLine(statement_header_id=header.id, **row)
+        db.add(line)
+        lines.append(line)
+    db.flush()
+    return lines
+
+
+def _persist_remittance_data(db: Session, blob_object: BlobObject, payload: bytes) -> tuple[list[RemittanceAdviceLine], list[str]]:
+    existing_header = db.scalar(
+        select(RemittanceAdviceHeader).where(RemittanceAdviceHeader.blob_object_id == blob_object.id)
+    )
+    if existing_header:
+        return list(existing_header.lines), []
+
+    report, raw_llm_output, extraction_method, llm_model = parse_remittance(payload)
+    normalized = report.normalized
+    header = RemittanceAdviceHeader(
+        blob_object_id=blob_object.id,
+        advice_number=normalized.advice_number,
+        advice_date=normalized.advice_date,
+        payer_name=normalized.payer_name,
+        payer_iban=normalized.payer_iban,
+        payer_bic=normalized.payer_bic,
+        document_currency=normalized.document_currency,
+        total_paid_amount=normalized.total_paid_amount,
+        document_language=normalized.document_language,
+        remittance_subject=normalized.remittance_subject,
+        raw_text=normalized.raw_text,
+        ocr_engine='none',
+        parsing_confidence=normalized.parsing_confidence,
+        extraction_method=extraction_method,
+        llm_model=llm_model,
+        llm_prompt_version=settings.llm_prompt_version,
+        raw_llm_output=raw_llm_output,
+        normalized_payload=normalized.model_dump(mode='json'),
+        validation_errors={'reason_codes': report.reason_codes} if report.reason_codes else None,
+    )
+    db.add(header)
+    db.flush()
+
+    lines: list[RemittanceAdviceLine] = []
+    for row in normalized.lines:
+        line = RemittanceAdviceLine(advice_header_id=header.id, **row.model_dump())
+        db.add(line)
+        lines.append(line)
+    db.flush()
+    return lines, report.reason_codes
+
+
+def _persist_matches(db: Session, run: IngestionRun, bank_lines: list[BankStatementLine], rem_lines: list[RemittanceAdviceLine]) -> list[ReconciliationMatch]:
+    existing = db.scalars(select(ReconciliationMatch).where(ReconciliationMatch.run_id == run.id)).all()
+    if existing:
+        return existing
+
+    bank_payload = [
+        {
+            'id': str(line.id),
+            'amount': line.amount,
+            'bank_reference': line.bank_reference,
+            'customer_reference': line.customer_reference,
+            'payment_purpose': line.payment_purpose,
+        }
+        for line in bank_lines
+    ]
+    rem_payload = [
+        {
+            'id': str(line.id),
+            'invoice_number': line.invoice_number,
+            'paid_amount': line.paid_amount,
+        }
+        for line in rem_lines
+    ]
+
+    candidates = generate_match_candidates(bank_payload, rem_payload)
+    persisted: list[ReconciliationMatch] = []
+    for cand in candidates:
+        match = ReconciliationMatch(
+            run_id=run.id,
+            bank_statement_line_id=UUID(cand['bank_statement_line_id']),
+            remittance_advice_line_id=(UUID(cand['remittance_advice_line_id']) if cand['remittance_advice_line_id'] else None),
+            status=cand['status'],
+            match_rule=cand['match_rule'],
+            confidence_score=cand['confidence_score'],
+            amount_applied=cand['amount_applied'],
+            variance_amount=cand['variance_amount'],
+            source=cand['source'],
+            is_selected=cand.get('is_selected', False),
+        )
+        db.add(match)
+        persisted.append(match)
+    db.flush()
+    return persisted
+
+
+def ingest_run(db: Session, tenant_code: str, business_date) -> IngestionRun:
+    client = BlobServiceClient.from_connection_string(settings.azurite_connection_string)
+    tenant = _ensure_tenant(db, tenant_code)
+
+    bank_prefix = build_blob_prefix(tenant_code, 'bank-statement', business_date)
+    rem_prefix = build_blob_prefix(tenant_code, 'remittance', business_date)
+
+    bank_blob_path, bank_payload = _get_blob(client, settings.azure_raw_container, bank_prefix, '.xlsx')
+    rem_blob_path, rem_payload = _get_blob(client, settings.azure_raw_container, rem_prefix, '.pdf')
+
+    bank_blob = _upsert_blob_object(db, tenant, SourceType.BANK_STATEMENT, business_date, bank_blob_path, bank_payload)
+    rem_blob = _upsert_blob_object(db, tenant, SourceType.REMITTANCE, business_date, rem_blob_path, rem_payload)
+
+    run = _create_run_if_needed(db, tenant, business_date, bank_blob, rem_blob)
+    if run.status in {RunStatus.POSTED, RunStatus.READY_TO_POST, RunStatus.REVIEW_REQUIRED}:
+        return run
+
+    bank_lines = _persist_bank_data(db, bank_blob, bank_payload)
+    rem_lines, extraction_reasons = _persist_remittance_data(db, rem_blob, rem_payload)
+    run.status = RunStatus.PARSED
+    run.parsed_line_count = len(bank_lines) + len(rem_lines)
+
+    matches = _persist_matches(db, run, bank_lines, rem_lines)
+    run.status = RunStatus.MATCHED
+    run.matched_line_count = len(matches)
+
+    requires_review = (
+        bool(extraction_reasons)
+        or any(m.status in {MatchStatus.PARTIAL_MATCH, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW} for m in matches if m.is_selected)
+        or any((m.confidence_score or Decimal('0.0')) < Decimal(str(settings.auto_post_confidence_threshold)) for m in matches if m.is_selected)
+    )
+
+    run.review_required_count = len(
+        [m for m in matches if m.is_selected and m.status in {MatchStatus.PARTIAL_MATCH, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW}]
+    )
+
+    if requires_review:
+        run.status = RunStatus.REVIEW_REQUIRED
+        run.review_reason_code = extraction_reasons[0] if extraction_reasons else 'LOW_CONFIDENCE_OR_PARTIAL'
+    else:
+        run.status = RunStatus.READY_TO_POST
+
+    db.add(
+        MatchActionAudit(
+            run_id=run.id,
+            action='INGEST_RUN',
+            actor_id='system',
+            reason_code=run.review_reason_code,
+            comment='Ingestion completed',
+        )
+    )
+
+    db.flush()
+    return run
+
+
+def _actor(actor_id: str | None) -> str:
+    return actor_id or 'analyst.demo'
+
+
+def _get_match(db: Session, match_id: UUID) -> ReconciliationMatch:
+    match = db.get(ReconciliationMatch, match_id)
+    if not match:
+        raise ServiceError(f'Match {match_id} not found')
+    return match
+
+
+def approve_match(db: Session, match_id: UUID, actor_id: str | None, reason_code: str | None, comment: str | None) -> MatchActionResponse:
+    match = _get_match(db, match_id)
+    match.status = MatchStatus.APPROVED
+    match.reviewed_by = _actor(actor_id)
+    match.reviewed_at = datetime.utcnow()
+    match.review_comment = comment
+
+    db.add(
+        MatchActionAudit(
+            run_id=match.run_id,
+            match_id=match.id,
+            action='APPROVE',
+            actor_id=match.reviewed_by,
+            reason_code=reason_code,
+            comment=comment,
+        )
+    )
+    db.flush()
+    return MatchActionResponse(
+        match_id=str(match.id),
+        status=match.status.value,
+        reviewed_by=match.reviewed_by,
+        reviewed_at=match.reviewed_at,
+    )
+
+
+def reject_match(db: Session, match_id: UUID, actor_id: str | None, reason_code: str | None, comment: str | None) -> MatchActionResponse:
+    match = _get_match(db, match_id)
+    match.status = MatchStatus.REJECTED
+    match.reviewed_by = _actor(actor_id)
+    match.reviewed_at = datetime.utcnow()
+    match.review_comment = comment
+
+    db.add(
+        MatchActionAudit(
+            run_id=match.run_id,
+            match_id=match.id,
+            action='REJECT',
+            actor_id=match.reviewed_by,
+            reason_code=reason_code,
+            comment=comment,
+        )
+    )
+    db.flush()
+    return MatchActionResponse(
+        match_id=str(match.id),
+        status=match.status.value,
+        reviewed_by=match.reviewed_by,
+        reviewed_at=match.reviewed_at,
+    )
+
+
+def manual_link(
+    db: Session,
+    run_id: UUID,
+    bank_statement_line_id: UUID,
+    remittance_advice_line_id: UUID | None,
+    actor_id: str | None,
+    reason_code: str | None,
+    comment: str | None,
+) -> MatchActionResponse:
+    db.scalars(
+        select(ReconciliationMatch)
+        .where(
+            ReconciliationMatch.run_id == run_id,
+            ReconciliationMatch.bank_statement_line_id == bank_statement_line_id,
+            ReconciliationMatch.is_selected.is_(True),
+        )
+    ).all()
+
+    for old in db.scalars(
+        select(ReconciliationMatch)
+        .where(
+            ReconciliationMatch.run_id == run_id,
+            ReconciliationMatch.bank_statement_line_id == bank_statement_line_id,
+            ReconciliationMatch.is_selected.is_(True),
+        )
+    ):
+        old.is_selected = False
+
+    manual = ReconciliationMatch(
+        run_id=run_id,
+        bank_statement_line_id=bank_statement_line_id,
+        remittance_advice_line_id=remittance_advice_line_id,
+        status=MatchStatus.APPROVED,
+        match_rule='manual_link',
+        confidence_score=Decimal('1.0000'),
+        amount_applied=None,
+        variance_amount=Decimal('0.00'),
+        source='MANUAL',
+        is_selected=True,
+        reviewed_by=_actor(actor_id),
+        reviewed_at=datetime.utcnow(),
+        review_comment=comment,
+    )
+    db.add(manual)
+    db.flush()
+
+    db.add(
+        MatchActionAudit(
+            run_id=run_id,
+            match_id=manual.id,
+            action='MANUAL_LINK',
+            actor_id=manual.reviewed_by or 'analyst.demo',
+            reason_code=reason_code,
+            comment=comment,
+        )
+    )
+    db.flush()
+    return MatchActionResponse(
+        match_id=str(manual.id),
+        status=manual.status.value,
+        reviewed_by=manual.reviewed_by,
+        reviewed_at=manual.reviewed_at,
+    )
+
+
+def post_journals(db: Session, run_id: UUID, actor_id: str | None) -> JournalEntryHeader:
+    run = db.get(IngestionRun, run_id)
+    if not run:
+        raise ServiceError(f'Run {run_id} not found')
+
+    if run.status not in {RunStatus.READY_TO_POST, RunStatus.REVIEW_REQUIRED}:
+        raise ServiceError(f'Run {run.id} is not ready for posting: {run.status.value}')
+
+    selected = db.scalars(
+        select(ReconciliationMatch)
+        .where(ReconciliationMatch.run_id == run.id, ReconciliationMatch.is_selected.is_(True))
+    ).all()
+
+    blocking = [m for m in selected if m.status in {MatchStatus.REJECTED, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW}]
+    if blocking:
+        raise ServiceError('Run has unresolved matches; cannot post journals')
+
+    header = db.scalar(select(JournalEntryHeader).where(JournalEntryHeader.run_id == run.id))
+    if not header:
+        header = JournalEntryHeader(
+            run_id=run.id,
+            company_code='1000',
+            posting_date=run.business_date,
+            document_date=run.business_date,
+            document_type='SA',
+            currency='EUR',
+            source_file_name=f'run-{run.id}.json',
+        )
+        db.add(header)
+        db.flush()
+
+    existing_lines = db.scalars(select(JournalEntryLine).where(JournalEntryLine.journal_header_id == header.id)).all()
+    if not existing_lines:
+        line_no = 1
+        for match in selected:
+            bank_line = db.get(BankStatementLine, match.bank_statement_line_id)
+            if not bank_line:
+                continue
+            amount = abs(bank_line.amount)
+            debit = amount if bank_line.amount > 0 else None
+            credit = amount if bank_line.amount <= 0 else None
+            db.add(
+                JournalEntryLine(
+                    journal_header_id=header.id,
+                    line_number=line_no,
+                    gl_account='100000',
+                    debit=debit,
+                    credit=credit,
+                    currency=bank_line.currency,
+                    item_text=bank_line.customer_reference or bank_line.bank_reference or 'auto-posted',
+                    reconciliation_match_id=match.id,
+                    bank_statement_line_id=bank_line.id,
+                    remittance_advice_line_id=match.remittance_advice_line_id,
+                )
+            )
+            line_no += 1
+
+    run.status = RunStatus.POSTED
+    run.finished_at = datetime.utcnow()
+    db.add(
+        MatchActionAudit(
+            run_id=run.id,
+            action='POST_JOURNALS',
+            actor_id=_actor(actor_id),
+            reason_code='POSTED',
+            comment='Journal entries posted',
+        )
+    )
+    db.flush()
+    return header

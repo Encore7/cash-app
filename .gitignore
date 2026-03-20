@@ -1,0 +1,13 @@
+.venv/
+*.egg-info/
+__pycache__/
+alembic/__pycache__/
+alembic/versions/__pycache__/
+.pytest_cache/
+.ruff_cache/
+.env
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+frontend/node_modules/

@@ -1,0 +1,48 @@
+[project]
+name = "cash-app"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.18.4",
+    "azure-storage-blob>=12.28.0",
+    "fastapi>=0.122.0",
+    "langchain-core>=1.1.0",
+    "langchain-google-genai>=3.1.0",
+    "openpyxl>=3.1.5",
+    "psycopg[binary]>=3.3.3",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.13.1",
+    "pypdf>=6.9.1",
+    "python-dotenv>=1.2.2",
+    "sqlalchemy>=2.0.48",
+    "uvicorn>=0.38.0",
+]
+
+[project.scripts]
+backend = "backend.cli:main"
+cash-app = "backend.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.15.6",
+]
+
+[tool.ruff]
+line-length = 160
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/env.py" = ["I001"]
+"alembic/versions/*.py" = ["E501", "I001", "UP007", "UP035"]
+"backend/api/routers/*.py" = ["B008"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]

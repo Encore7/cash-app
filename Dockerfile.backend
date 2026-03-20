@@ -1,0 +1,17 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir uv
+
+COPY pyproject.toml uv.lock /app/
+COPY backend /app/backend
+COPY alembic /app/alembic
+COPY alembic.ini /app/alembic.ini
+COPY .env.example /app/.env.example
+
+RUN uv sync --frozen
+
+EXPOSE 8000
+
+CMD ["uv", "run", "backend"]
