@@ -1,18 +1,12 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import {
     Box,
     Chip,
     CircularProgress,
-    Paper,
-    Table,
-    TableBody,
-    TableCell,
-    TableContainer,
-    TableHead,
-    TableRow,
     Typography,
 } from '@mui/material'
+import { DataGrid, GridColDef, GridRenderCellParams } from '@mui/x-data-grid'
 
 const API = 'http://localhost:8000'
 
@@ -53,9 +47,53 @@ export default function JournalPage() {
             .finally(() => setLoading(false))
     }, [])
 
+    const columns = useMemo<GridColDef[]>(() => [
+        { field: 'line_number', headerName: '#', width: 70 },
+        { field: 'company_code', headerName: 'Company', width: 120 },
+        { field: 'posting_date', headerName: 'Posting Date', width: 130 },
+        { field: 'document_date', headerName: 'Doc Date', width: 120 },
+        { field: 'document_type', headerName: 'Doc Type', width: 110 },
+        { field: 'gl_account', headerName: 'GL Account', width: 130 },
+        {
+            field: 'debit',
+            headerName: 'Debit',
+            width: 120,
+            valueGetter: (_v, row) => fmt(row.debit),
+        },
+        {
+            field: 'credit',
+            headerName: 'Credit',
+            width: 120,
+            valueGetter: (_v, row) => fmt(row.credit),
+        },
+        { field: 'currency', headerName: 'Ccy', width: 80 },
+        { field: 'item_text', headerName: 'Item Text', minWidth: 220, flex: 1, valueGetter: (_v, row) => row.item_text ?? '–' },
+        { field: 'source_file_name', headerName: 'Source File', minWidth: 170, flex: 1, valueGetter: (_v, row) => row.source_file_name ?? '–' },
+        {
+            field: 'links',
+            headerName: 'Links',
+            width: 220,
+            sortable: false,
+            filterable: false,
+            renderCell: (params: GridRenderCellParams<JournalEntry>) => (
+                <Box display='flex' gap={0.5} flexWrap='wrap'>
+                    {params.row.reconciliation_match_id && (
+                        <Chip size='small' label='Match' color='success' variant='outlined' />
+                    )}
+                    {params.row.bank_statement_id && (
+                        <Chip size='small' label='Bank' color='primary' variant='outlined' />
+                    )}
+                    {params.row.remittance_advice_line_id && (
+                        <Chip size='small' label='Rem.' color='secondary' variant='outlined' />
+                    )}
+                </Box>
+            ),
+        },
+    ], [])
+
     if (loading) {
         return (
-            <Box display="flex" justifyContent="center" alignItems="center" minHeight={300}>
+            <Box display='flex' justifyContent='center' alignItems='center' minHeight={300}>
                 <CircularProgress />
             </Box>
         )
@@ -63,84 +101,17 @@ export default function JournalPage() {
 
     return (
         <Box sx={{ p: 3 }}>
-            <Typography variant="h5" gutterBottom>
+            <Typography variant='h5' gutterBottom>
                 Journal Entries
             </Typography>
-            <TableContainer component={Paper}>
-                <Table size="small">
-                    <TableHead>
-                        <TableRow>
-                            <TableCell>#</TableCell>
-                            <TableCell>Company</TableCell>
-                            <TableCell>Posting Date</TableCell>
-                            <TableCell>Doc Date</TableCell>
-                            <TableCell>Doc Type</TableCell>
-                            <TableCell>GL Account</TableCell>
-                            <TableCell align="right">Debit</TableCell>
-                            <TableCell align="right">Credit</TableCell>
-                            <TableCell>Ccy</TableCell>
-                            <TableCell>Item Text</TableCell>
-                            <TableCell>Source File</TableCell>
-                            <TableCell>Links</TableCell>
-                        </TableRow>
-                    </TableHead>
-                    <TableBody>
-                        {entries.length === 0 && (
-                            <TableRow>
-                                <TableCell colSpan={12} align="center">
-                                    <Typography color="text.secondary">No journal entries yet.</Typography>
-                                </TableCell>
-                            </TableRow>
-                        )}
-                        {entries.map((e) => (
-                            <TableRow key={e.id} hover>
-                                <TableCell>{e.line_number}</TableCell>
-                                <TableCell>{e.company_code}</TableCell>
-                                <TableCell>{e.posting_date}</TableCell>
-                                <TableCell>{e.document_date}</TableCell>
-                                <TableCell>{e.document_type}</TableCell>
-                                <TableCell>{e.gl_account}</TableCell>
-                                <TableCell align="right">{fmt(e.debit)}</TableCell>
-                                <TableCell align="right">{fmt(e.credit)}</TableCell>
-                                <TableCell>{e.currency}</TableCell>
-                                <TableCell
-                                    sx={{
-                                        maxWidth: 200,
-                                        overflow: 'hidden',
-                                        textOverflow: 'ellipsis',
-                                        whiteSpace: 'nowrap',
-                                    }}
-                                >
-                                    {e.item_text ?? '–'}
-                                </TableCell>
-                                <TableCell
-                                    sx={{
-                                        maxWidth: 160,
-                                        overflow: 'hidden',
-                                        textOverflow: 'ellipsis',
-                                        whiteSpace: 'nowrap',
-                                    }}
-                                >
-                                    {e.source_file_name ?? '–'}
-                                </TableCell>
-                                <TableCell>
-                                    <Box display="flex" gap={0.5} flexWrap="wrap">
-                                        {e.reconciliation_match_id && (
-                                            <Chip size="small" label="Match" color="success" variant="outlined" />
-                                        )}
-                                        {e.bank_statement_id && (
-                                            <Chip size="small" label="Bank" color="primary" variant="outlined" />
-                                        )}
-                                        {e.remittance_advice_line_id && (
-                                            <Chip size="small" label="Rem." color="secondary" variant="outlined" />
-                                        )}
-                                    </Box>
-                                </TableCell>
-                            </TableRow>
-                        ))}
-                    </TableBody>
-                </Table>
-            </TableContainer>
+            <DataGrid
+                rows={entries}
+                columns={columns}
+                autoHeight
+                disableRowSelectionOnClick
+                pageSizeOptions={[10, 25, 50]}
+                initialState={{ pagination: { paginationModel: { pageSize: 10 } } }}
+            />
         </Box>
     )
 }

@@ -30,3 +30,8 @@ class MatchStatus(StrEnum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     CLOSED = "CLOSED"
+
+
+class RuleType(StrEnum):
+    PROCESSING = "processing"
+    MATCHING = "matching"

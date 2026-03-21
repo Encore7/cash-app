@@ -11,11 +11,9 @@ import {
 import { AppProvider } from '@toolpad/core/AppProvider'
 import { DashboardLayout } from '@toolpad/core/DashboardLayout'
 import WorkHistoryIcon from '@mui/icons-material/WorkHistory'
-import DashboardIcon from '@mui/icons-material/Dashboard'
 import BarChartIcon from '@mui/icons-material/BarChart'
 import MenuBookIcon from '@mui/icons-material/MenuBook'
 import JobsPage from './pages/JobsPage'
-import DashboardPage from './pages/DashboardPage'
 import AnalyticsPage from './pages/AnalyticsPage'
 import JournalPage from './pages/JournalPage'
 
@@ -34,11 +32,6 @@ const NAVIGATION = [
     segment: 'journal',
     title: 'Journal Entries',
     icon: <MenuBookIcon />,
-  },
-  {
-    segment: 'dashboard',
-    title: 'Dashboard',
-    icon: <DashboardIcon />,
   },
 ]
 
@@ -77,7 +70,6 @@ const browserRouter = createBrowserRouter([
       { path: 'jobs', element: <JobsPage /> },
       { path: 'analytics', element: <AnalyticsPage /> },
       { path: 'journal', element: <JournalPage /> },
-      { path: 'dashboard', element: <DashboardPage /> },
     ],
   },
 ])

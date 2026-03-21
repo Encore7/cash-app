@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.db.base import Base
-from backend.models.enums import RunStatus, ScheduleFrequency, SourceType
+from backend.models.enums import RuleType, RunStatus, ScheduleFrequency, SourceType
 
 if TYPE_CHECKING:
     from backend.models.bank import BankStatement
@@ -126,11 +126,17 @@ class JobScheduleRule(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("tenants.id"), nullable=True
+    rule_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="processing"
     )
     frequency: Mapped[ScheduleFrequency] = mapped_column(
-        SAEnum(ScheduleFrequency), nullable=False
+        SAEnum(
+            ScheduleFrequency,
+            name="schedulefrequency",
+            create_type=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
+        nullable=False,
     )
     day_of_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
     day_of_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -143,4 +149,24 @@ class JobScheduleRule(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    tenant: Mapped[Tenant | None] = relationship()
+    rule_tenants: Mapped[list["JobScheduleRuleTenant"]] = relationship(
+        back_populates="rule", cascade="all, delete-orphan"
+    )
+
+
+class JobScheduleRuleTenant(Base):
+    __tablename__ = "job_schedule_rule_tenants"
+
+    rule_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("job_schedule_rules.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    rule: Mapped[JobScheduleRule] = relationship(back_populates="rule_tenants")
+    tenant: Mapped[Tenant] = relationship()

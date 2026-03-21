@@ -267,6 +267,134 @@ def _persist_matches(
     return persisted
 
 
+def ingest_run_processing_only(
+    db: Session, tenant_code: str, business_date
+) -> IngestionRun:
+    """Download blobs and populate bank_statement + remittance tables only (no matching)."""
+    client = BlobServiceClient.from_connection_string(
+        settings.azurite_connection_string
+    )
+    tenant = _ensure_tenant(db, tenant_code)
+
+    bank_prefix = build_blob_prefix(tenant_code, "bank-statement", business_date)
+    rem_prefix = build_blob_prefix(tenant_code, "remittance", business_date)
+
+    bank_blob_path, bank_payload = _get_blob(
+        client, settings.azure_raw_container, bank_prefix, ".xlsx"
+    )
+    rem_blob_path, rem_payload = _get_blob(
+        client, settings.azure_raw_container, rem_prefix, ".pdf"
+    )
+
+    bank_blob = _upsert_blob_object(
+        db,
+        tenant,
+        SourceType.BANK_STATEMENT,
+        business_date,
+        bank_blob_path,
+        bank_payload,
+    )
+    rem_blob = _upsert_blob_object(
+        db, tenant, SourceType.REMITTANCE, business_date, rem_blob_path, rem_payload
+    )
+
+    run = _create_run_if_needed(db, tenant, business_date, bank_blob, rem_blob)
+    # If already processed beyond RECEIVED, skip re-parsing
+    if run.status not in {RunStatus.RECEIVED, RunStatus.FAILED}:
+        return run
+
+    _persist_bank_data(db, bank_blob, bank_payload)
+    _persist_remittance_data(db, rem_blob, rem_payload)
+    bank_blob.is_parsed = True
+    rem_blob.is_parsed = True
+    run.status = RunStatus.PARSED
+    db.flush()
+    return run
+
+
+def run_matching_for_parsed_runs(
+    db: Session, tenant_codes: list[str] | None = None
+) -> list[ReconciliationMatch]:
+    """Find all PARSED ingestion runs, run reconciliation matching, and update their status."""
+    from backend.models.core import Tenant as _Tenant  # avoid circular at module level
+
+    query = select(IngestionRun).where(IngestionRun.status == RunStatus.PARSED)
+    if tenant_codes:
+        query = query.join(_Tenant, IngestionRun.tenant_id == _Tenant.id).where(
+            _Tenant.code.in_(tenant_codes)
+        )
+    runs = db.scalars(query).all()
+
+    all_matches: list[ReconciliationMatch] = []
+    for run in runs:
+        bank_blob = db.get(BlobObject, run.bank_blob_id)
+        bank_rows = (
+            list(
+                db.scalars(
+                    select(BankStatement).where(
+                        BankStatement.blob_object_id == bank_blob.id
+                    )
+                ).all()
+            )
+            if bank_blob
+            else []
+        )
+        rem_blob = db.get(BlobObject, run.remittance_blob_id)
+        rem_header = (
+            db.scalar(
+                select(RemittanceAdviceHeader).where(
+                    RemittanceAdviceHeader.blob_object_id == rem_blob.id
+                )
+            )
+            if rem_blob
+            else None
+        )
+        rem_lines = list(rem_header.lines) if rem_header else []
+
+        matches = _persist_matches(db, run, bank_rows, rem_lines)
+        all_matches.extend(matches)
+
+        run.status = RunStatus.MATCHED
+        run.matched_line_count = len(matches)
+
+        requires_review = any(
+            m.status
+            in {
+                MatchStatus.PARTIAL_MATCH,
+                MatchStatus.UNMATCHED,
+                MatchStatus.MANUAL_REVIEW,
+            }
+            for m in matches
+            if m.is_selected
+        ) or any(
+            (m.confidence_score or Decimal("0.0"))
+            < Decimal(str(settings.auto_post_confidence_threshold))
+            for m in matches
+            if m.is_selected
+        )
+        run.review_required_count = len(
+            [
+                m
+                for m in matches
+                if m.is_selected
+                and m.status
+                in {
+                    MatchStatus.PARTIAL_MATCH,
+                    MatchStatus.UNMATCHED,
+                    MatchStatus.MANUAL_REVIEW,
+                }
+            ]
+        )
+        if requires_review:
+            run.status = RunStatus.REVIEW_REQUIRED
+            run.review_reason_code = "LOW_CONFIDENCE_OR_PARTIAL"
+        else:
+            run.status = RunStatus.READY_TO_POST
+        db.flush()
+
+    return all_matches
+
+
 def ingest_run(db: Session, tenant_code: str, business_date) -> IngestionRun:
     client = BlobServiceClient.from_connection_string(
         settings.azurite_connection_string
