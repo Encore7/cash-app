@@ -7,11 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.db.deps import get_db
-from backend.models.bank import BankStatementLine
+from backend.models.bank import BankStatement
 from backend.models.core import IngestionRun, Tenant
-from backend.models.journal import JournalEntryHeader, JournalEntryLine
+from backend.models.journal import JournalEntry
 from backend.models.reconciliation import ReconciliationMatch
-from backend.models.remittance import RemittanceAdviceLine
+from backend.models.remittance import RemittanceAdviceHeader, RemittanceAdviceLine
 from backend.schemas.api import IngestRunRequest, JournalLineView, JournalPreviewResponse, RunItemsResponse, RunResponse
 from backend.services.run_service import ServiceError, ingest_run, post_journals
 
@@ -61,8 +61,18 @@ def get_run_items(run_id: UUID, db: Session = Depends(get_db)) -> RunItemsRespon
         raise HTTPException(status_code=404, detail='Run not found')
 
     matches = db.scalars(select(ReconciliationMatch).where(ReconciliationMatch.run_id == run.id)).all()
-    bank_line_count = len(db.scalars(select(BankStatementLine)).all())
-    remittance_line_count = len(db.scalars(select(RemittanceAdviceLine)).all())
+    bank_line_count = 0
+    remittance_line_count = 0
+
+    if run.bank_blob_id:
+        bank_line_count = len(db.scalars(select(BankStatement).where(BankStatement.blob_object_id == run.bank_blob_id)).all())
+
+    if run.remittance_blob_id:
+        rem_header = db.scalar(select(RemittanceAdviceHeader).where(RemittanceAdviceHeader.blob_object_id == run.remittance_blob_id))
+        if rem_header:
+            remittance_line_count = len(
+                db.scalars(select(RemittanceAdviceLine).where(RemittanceAdviceLine.advice_header_id == rem_header.id)).all()
+            )
 
     return RunItemsResponse(
         run_id=str(run.id),
@@ -80,7 +90,7 @@ def get_run_items(run_id: UUID, db: Session = Depends(get_db)) -> RunItemsRespon
                 'reviewed_by': m.reviewed_by,
                 'reviewed_at': m.reviewed_at,
                 'review_comment': m.review_comment,
-                'bank_line_id': str(m.bank_statement_line_id),
+                'bank_line_id': str(m.bank_statement_id),
                 'remittance_line_id': str(m.remittance_advice_line_id) if m.remittance_advice_line_id else None,
             }
             for m in matches
@@ -95,14 +105,13 @@ def post_run_journals(
     db: Session = Depends(get_db),
 ) -> JournalPreviewResponse:
     try:
-        header = post_journals(db, run_id, x_actor_id)
+        lines = post_journals(db, run_id, x_actor_id)
         db.commit()
-        lines = db.scalars(select(JournalEntryLine).where(JournalEntryLine.journal_header_id == header.id)).all()
         run = db.get(IngestionRun, run_id)
         return JournalPreviewResponse(
             run_id=str(run_id),
             status=run.status.value if run else 'POSTED',
-            journal_headers=1,
+            journal_headers=1 if lines else 0,
             journal_lines=[
                 JournalLineView(
                     id=str(line.id),
@@ -112,9 +121,7 @@ def post_run_journals(
                     credit=line.credit,
                     currency=line.currency,
                     item_text=line.item_text,
-                    reconciliation_match_id=(
-                        str(line.reconciliation_match_id) if line.reconciliation_match_id else None
-                    ),
+                    reconciliation_match_id=(str(line.reconciliation_match_id) if line.reconciliation_match_id else None),
                 )
                 for line in lines
             ],
@@ -129,28 +136,26 @@ def get_run_journals(run_id: UUID, db: Session = Depends(get_db)) -> JournalPrev
     run = db.get(IngestionRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail='Run not found')
-    headers = db.scalars(select(JournalEntryHeader).where(JournalEntryHeader.run_id == run.id)).all()
-    lines: list[JournalLineView] = []
-    for header in headers:
-        h_lines = db.scalars(select(JournalEntryLine).where(JournalEntryLine.journal_header_id == header.id)).all()
-        for line in h_lines:
-            lines.append(
-                JournalLineView(
-                    id=str(line.id),
-                    line_number=line.line_number,
-                    gl_account=line.gl_account,
-                    debit=line.debit,
-                    credit=line.credit,
-                    currency=line.currency,
-                    item_text=line.item_text,
-                    reconciliation_match_id=str(line.reconciliation_match_id)
-                    if line.reconciliation_match_id
-                    else None,
-                )
-            )
+
+    lines = db.scalars(
+        select(JournalEntry).where(JournalEntry.run_id == run.id).order_by(JournalEntry.line_number.asc())
+    ).all()
+
     return JournalPreviewResponse(
         run_id=str(run.id),
         status=run.status.value,
-        journal_headers=len(headers),
-        journal_lines=lines,
+        journal_headers=1 if lines else 0,
+        journal_lines=[
+            JournalLineView(
+                id=str(line.id),
+                line_number=line.line_number,
+                gl_account=line.gl_account,
+                debit=line.debit,
+                credit=line.credit,
+                currency=line.currency,
+                item_text=line.item_text,
+                reconciliation_match_id=str(line.reconciliation_match_id) if line.reconciliation_match_id else None,
+            )
+            for line in lines
+        ],
     )

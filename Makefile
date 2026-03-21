@@ -1,4 +1,4 @@
-.PHONY: setup infra-up infra-down db-upgrade db-revision seed-raw lint run api-up api-down test
+.PHONY: setup infra-up infra-down db-upgrade db-revision seed-raw lint run api-up api-down test runner-up runner-once runner-down
 
 setup:
 	cp -n .env.example .env || true
@@ -12,6 +12,15 @@ api-up:
 
 api-down:
 	docker compose stop backend frontend
+
+runner-up:
+	docker compose up -d job-runner
+
+runner-down:
+	docker compose stop job-runner
+
+runner-once:
+	docker compose run --rm -e RUNNER_MODE=once job-runner
 
 infra-down:
 	docker compose down

@@ -44,15 +44,7 @@ def _as_date(value: object) -> date | None:
     return None
 
 
-def _json_safe(value: object) -> object:
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, date):
-        return value.isoformat()
-    return value
-
-
-def parse_bank_statement(content: bytes) -> tuple[dict, list[dict]]:
+def parse_bank_statement(content: bytes) -> list[dict]:
     workbook = load_workbook(BytesIO(content), data_only=True)
     sheet = workbook.active
     headers = [sheet.cell(1, i).value for i in range(1, sheet.max_column + 1)]
@@ -77,32 +69,12 @@ def parse_bank_statement(content: bytes) -> tuple[dict, list[dict]]:
                 'amount': Decimal(str(row_data.get('amount'))),
                 'counterparty_name': row_data.get('counterparty_name'),
                 'payment_purpose': row_data.get('payment_purpose'),
-                'counterparty_account': row_data.get('counterparty_account'),
-                'bic': row_data.get('bic'),
-                'bank_name': row_data.get('bank_name'),
-                'bank_code': str(row_data.get('bank_code')) if row_data.get('bank_code') is not None else None,
-                'booking_text': row_data.get('booking_text'),
                 'bank_reference': str(row_data.get('bank_reference')) if row_data.get('bank_reference') else None,
-                'iban': row_data.get('iban'),
-                'account_label': row_data.get('account_label'),
-                'account_number': str(row_data.get('account_number')) if row_data.get('account_number') else None,
                 'customer_reference': str(row_data.get('customer_reference')) if row_data.get('customer_reference') else None,
                 'currency': str(row_data.get('currency') or 'EUR'),
-                'raw_payload': {k: _json_safe(v) for k, v in row_data.items()},
             }
         )
-
-    total_credit = sum((r['amount'] for r in rows if r['amount'] > 0), Decimal('0.00'))
-    total_debit = sum((abs(r['amount']) for r in rows if r['amount'] < 0), Decimal('0.00'))
-
-    header = {
-        'sheet_name': sheet.title,
-        'statement_currency': 'EUR',
-        'line_count': len(rows),
-        'total_credit_amount': total_credit,
-        'total_debit_amount': total_debit,
-    }
-    return header, rows
+    return rows
 
 
 def validate_remittance_result(result: RemittanceExtractionResult) -> RemittanceValidationReport:
@@ -135,7 +107,7 @@ def validate_remittance_result(result: RemittanceExtractionResult) -> Remittance
 
 def parse_remittance(content: bytes) -> tuple[RemittanceValidationReport, dict, str, str]:
     raw_text = extract_pdf_text(content)
-    extracted, raw_llm_output, method, llm_model = extract_remittance_with_llm(raw_text)
+    extracted, raw_llm_output, method, llm_model = extract_remittance_with_llm(raw_text, pdf_bytes=content)
     extracted.raw_text = raw_text
     report = validate_remittance_result(extracted)
     return report, raw_llm_output, method, llm_model

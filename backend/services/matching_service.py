@@ -23,6 +23,29 @@ def generate_match_candidates(bank_lines: list[dict], remittance_lines: list[dic
     for bank in bank_lines:
         bank_amount = abs(bank['amount'])
         local_candidates: list[dict] = []
+        remaining = [r for r in remittance_lines if r['id'] not in used_remittance_ids and r.get('paid_amount') is not None]
+
+        # Rule 0: full remittance set equals one bank payment (header-total equivalent).
+        if remaining:
+            full_sum = sum((abs(r['paid_amount']) for r in remaining), Decimal('0.00'))
+            if abs(full_sum - bank_amount) <= Decimal('0.02'):
+                for rem in remaining:
+                    local_candidates.append(
+                        {
+                            'bank_statement_line_id': bank['id'],
+                            'remittance_advice_line_id': rem['id'],
+                            'match_rule': 'header_total_amount_exact',
+                            'confidence_score': Decimal('0.97'),
+                            'amount_applied': rem['paid_amount'],
+                            'variance_amount': Decimal('0.00'),
+                            'status': MatchStatus.AUTO_MATCHED,
+                            'source': 'RULE',
+                            'is_selected': True,
+                        }
+                    )
+                candidates.extend(local_candidates)
+                used_remittance_ids.update(rem['id'] for rem in remaining)
+                continue
 
         # Rule 1: exact reference based matching
         for rem in remittance_lines:
@@ -70,7 +93,6 @@ def generate_match_candidates(bank_lines: list[dict], remittance_lines: list[dic
                 )
 
         # Rule 3: aggregate 2-3 remittance lines
-        remaining = [r for r in remittance_lines if r['id'] not in used_remittance_ids and r.get('paid_amount') is not None]
         agg_selected: list[dict] = []
         for size in (2, 3):
             if len(remaining) < size:
@@ -90,6 +112,7 @@ def generate_match_candidates(bank_lines: list[dict], remittance_lines: list[dic
                                 'variance_amount': Decimal('0.00'),
                                 'status': MatchStatus.PARTIAL_MATCH,
                                 'source': 'RULE',
+                                'is_selected': True,
                             }
                         )
                     found = True
@@ -138,11 +161,20 @@ def generate_match_candidates(bank_lines: list[dict], remittance_lines: list[dic
 
         local_candidates.sort(key=lambda c: c['confidence_score'], reverse=True)
         if local_candidates:
-            local_candidates[0]['is_selected'] = True
-            for cand in local_candidates[1:]:
-                cand['is_selected'] = False
-            if local_candidates[0]['remittance_advice_line_id']:
-                used_remittance_ids.add(local_candidates[0]['remittance_advice_line_id'])
+            any_preselected = any(c.get('is_selected') for c in local_candidates)
+            if any_preselected:
+                for cand in local_candidates:
+                    cand['is_selected'] = bool(cand.get('is_selected'))
+            else:
+                local_candidates[0]['is_selected'] = True
+                for cand in local_candidates[1:]:
+                    cand['is_selected'] = False
+
+            used_remittance_ids.update(
+                c['remittance_advice_line_id']
+                for c in local_candidates
+                if c.get('is_selected') and c.get('remittance_advice_line_id')
+            )
         candidates.extend(local_candidates)
 
     return candidates

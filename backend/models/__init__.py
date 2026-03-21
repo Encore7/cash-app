@@ -1,8 +1,8 @@
-from backend.models.bank import BankStatementHeader, BankStatementLine
+from backend.models.bank import BankStatement
 from backend.models.core import BlobObject, IngestionRun, Tenant
 from backend.models.enums import MatchStatus, RunStatus, SourceType
-from backend.models.journal import JournalEntryHeader, JournalEntryLine
-from backend.models.reconciliation import MatchActionAudit, ReconciliationMatch
+from backend.models.journal import JournalEntry
+from backend.models.reconciliation import ReconciliationMatch
 from backend.models.remittance import RemittanceAdviceHeader, RemittanceAdviceLine
 
 __all__ = [
@@ -12,12 +12,9 @@ __all__ = [
     'Tenant',
     'BlobObject',
     'IngestionRun',
-    'BankStatementHeader',
-    'BankStatementLine',
+    'BankStatement',
     'RemittanceAdviceHeader',
     'RemittanceAdviceLine',
     'ReconciliationMatch',
-    'MatchActionAudit',
-    'JournalEntryHeader',
-    'JournalEntryLine',
+    'JournalEntry',
 ]

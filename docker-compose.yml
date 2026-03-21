@@ -56,6 +56,38 @@ services:
       azurite:
         condition: service_started
 
+  job-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: cash-app-job-runner
+    command: ["uv", "run", "python", "-m", "backend.jobs.runner"]
+    environment:
+      APP_ENV: dev
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: backend
+      POSTGRES_USER: backend
+      POSTGRES_PASSWORD: backend
+      AZURITE_BLOB_HOST: azurite
+      AZURITE_BLOB_PORT: 10000
+      AZURE_ACCOUNT_NAME: devstoreaccount1
+      AZURE_ACCOUNT_KEY: Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+      AZURE_RAW_CONTAINER: raw
+      RUNNER_MODE: ${RUNNER_MODE:-scheduled}
+      RUNNER_INTERVAL_SECONDS: ${RUNNER_INTERVAL_SECONDS:-300}
+      RUNNER_TENANT_CODE: ${RUNNER_TENANT_CODE:-}
+      RUNNER_BUSINESS_DATE: ${RUNNER_BUSINESS_DATE:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
+      LLM_PROMPT_VERSION: ${LLM_PROMPT_VERSION:-v1}
+      AUTO_POST_CONFIDENCE_THRESHOLD: ${AUTO_POST_CONFIDENCE_THRESHOLD:-0.9}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      azurite:
+        condition: service_started
+
   frontend:
     build:
       context: .

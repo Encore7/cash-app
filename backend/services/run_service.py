@@ -9,11 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.config import settings
-from backend.models.bank import BankStatementHeader, BankStatementLine
+from backend.models.bank import BankStatement
 from backend.models.core import BlobObject, IngestionRun, Tenant
 from backend.models.enums import MatchStatus, RunStatus, SourceType
-from backend.models.journal import JournalEntryHeader, JournalEntryLine
-from backend.models.reconciliation import MatchActionAudit, ReconciliationMatch
+from backend.models.journal import JournalEntry
+from backend.models.reconciliation import ReconciliationMatch
 from backend.models.remittance import RemittanceAdviceHeader, RemittanceAdviceLine
 from backend.schemas.api import MatchActionResponse
 from backend.services.matching_service import generate_match_candidates
@@ -90,7 +90,13 @@ def _create_run_if_needed(db: Session, tenant: Tenant, business_date, bank_blob:
         )
         .order_by(IngestionRun.started_at.desc())
     )
-    if existing and existing.status in {RunStatus.POSTED, RunStatus.READY_TO_POST, RunStatus.REVIEW_REQUIRED}:
+    if existing:
+        if existing.status == RunStatus.FAILED:
+            existing.status = RunStatus.RECEIVED
+            existing.error_message = None
+            existing.review_reason_code = None
+            existing.finished_at = None
+            db.flush()
         return existing
 
     run = IngestionRun(
@@ -105,25 +111,19 @@ def _create_run_if_needed(db: Session, tenant: Tenant, business_date, bank_blob:
     return run
 
 
-def _persist_bank_data(db: Session, blob_object: BlobObject, payload: bytes) -> list[BankStatementLine]:
-    existing_header = db.scalar(
-        select(BankStatementHeader).where(BankStatementHeader.blob_object_id == blob_object.id)
-    )
-    if existing_header:
-        return list(existing_header.lines)
+def _persist_bank_data(db: Session, blob_object: BlobObject, payload: bytes) -> list[BankStatement]:
+    existing = db.scalars(select(BankStatement).where(BankStatement.blob_object_id == blob_object.id)).all()
+    if existing:
+        return list(existing)
 
-    header_data, line_data = parse_bank_statement(payload)
-    header = BankStatementHeader(blob_object_id=blob_object.id, source_file_name=blob_object.blob_path, **header_data)
-    db.add(header)
+    rows = parse_bank_statement(payload)
+    statements: list[BankStatement] = []
+    for row in rows:
+        statement = BankStatement(blob_object_id=blob_object.id, **row)
+        db.add(statement)
+        statements.append(statement)
     db.flush()
-
-    lines: list[BankStatementLine] = []
-    for row in line_data:
-        line = BankStatementLine(statement_header_id=header.id, **row)
-        db.add(line)
-        lines.append(line)
-    db.flush()
-    return lines
+    return statements
 
 
 def _persist_remittance_data(db: Session, blob_object: BlobObject, payload: bytes) -> tuple[list[RemittanceAdviceLine], list[str]]:
@@ -133,55 +133,58 @@ def _persist_remittance_data(db: Session, blob_object: BlobObject, payload: byte
     if existing_header:
         return list(existing_header.lines), []
 
-    report, raw_llm_output, extraction_method, llm_model = parse_remittance(payload)
+    report, _, _, _ = parse_remittance(payload)
     normalized = report.normalized
     header = RemittanceAdviceHeader(
         blob_object_id=blob_object.id,
         advice_number=normalized.advice_number,
         advice_date=normalized.advice_date,
         payer_name=normalized.payer_name,
-        payer_iban=normalized.payer_iban,
-        payer_bic=normalized.payer_bic,
         document_currency=normalized.document_currency,
         total_paid_amount=normalized.total_paid_amount,
-        document_language=normalized.document_language,
-        remittance_subject=normalized.remittance_subject,
-        raw_text=normalized.raw_text,
-        ocr_engine='none',
-        parsing_confidence=normalized.parsing_confidence,
-        extraction_method=extraction_method,
-        llm_model=llm_model,
-        llm_prompt_version=settings.llm_prompt_version,
-        raw_llm_output=raw_llm_output,
-        normalized_payload=normalized.model_dump(mode='json'),
-        validation_errors={'reason_codes': report.reason_codes} if report.reason_codes else None,
     )
     db.add(header)
     db.flush()
 
     lines: list[RemittanceAdviceLine] = []
     for row in normalized.lines:
-        line = RemittanceAdviceLine(advice_header_id=header.id, **row.model_dump())
+        line_payload = row.model_dump(
+            include={
+                'line_number',
+                'invoice_number',
+                'invoice_date',
+                'paid_amount',
+                'currency',
+                'customer_reference',
+                'raw_line_text',
+            }
+        )
+        line = RemittanceAdviceLine(advice_header_id=header.id, **line_payload)
         db.add(line)
         lines.append(line)
     db.flush()
     return lines, report.reason_codes
 
 
-def _persist_matches(db: Session, run: IngestionRun, bank_lines: list[BankStatementLine], rem_lines: list[RemittanceAdviceLine]) -> list[ReconciliationMatch]:
+def _persist_matches(
+    db: Session,
+    run: IngestionRun,
+    bank_rows: list[BankStatement],
+    rem_lines: list[RemittanceAdviceLine],
+) -> list[ReconciliationMatch]:
     existing = db.scalars(select(ReconciliationMatch).where(ReconciliationMatch.run_id == run.id)).all()
     if existing:
         return existing
 
     bank_payload = [
         {
-            'id': str(line.id),
-            'amount': line.amount,
-            'bank_reference': line.bank_reference,
-            'customer_reference': line.customer_reference,
-            'payment_purpose': line.payment_purpose,
+            'id': str(row.id),
+            'amount': row.amount,
+            'bank_reference': row.bank_reference,
+            'customer_reference': row.customer_reference,
+            'payment_purpose': row.payment_purpose,
         }
-        for line in bank_lines
+        for row in bank_rows
     ]
     rem_payload = [
         {
@@ -197,7 +200,7 @@ def _persist_matches(db: Session, run: IngestionRun, bank_lines: list[BankStatem
     for cand in candidates:
         match = ReconciliationMatch(
             run_id=run.id,
-            bank_statement_line_id=UUID(cand['bank_statement_line_id']),
+            bank_statement_id=UUID(cand['bank_statement_line_id']),
             remittance_advice_line_id=(UUID(cand['remittance_advice_line_id']) if cand['remittance_advice_line_id'] else None),
             status=cand['status'],
             match_rule=cand['match_rule'],
@@ -230,23 +233,35 @@ def ingest_run(db: Session, tenant_code: str, business_date) -> IngestionRun:
     if run.status in {RunStatus.POSTED, RunStatus.READY_TO_POST, RunStatus.REVIEW_REQUIRED}:
         return run
 
-    bank_lines = _persist_bank_data(db, bank_blob, bank_payload)
+    bank_rows = _persist_bank_data(db, bank_blob, bank_payload)
     rem_lines, extraction_reasons = _persist_remittance_data(db, rem_blob, rem_payload)
     run.status = RunStatus.PARSED
-    run.parsed_line_count = len(bank_lines) + len(rem_lines)
+    run.parsed_line_count = len(bank_rows) + len(rem_lines)
 
-    matches = _persist_matches(db, run, bank_lines, rem_lines)
+    matches = _persist_matches(db, run, bank_rows, rem_lines)
     run.status = RunStatus.MATCHED
     run.matched_line_count = len(matches)
 
     requires_review = (
         bool(extraction_reasons)
-        or any(m.status in {MatchStatus.PARTIAL_MATCH, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW} for m in matches if m.is_selected)
-        or any((m.confidence_score or Decimal('0.0')) < Decimal(str(settings.auto_post_confidence_threshold)) for m in matches if m.is_selected)
+        or any(
+            m.status in {MatchStatus.PARTIAL_MATCH, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW}
+            for m in matches
+            if m.is_selected
+        )
+        or any(
+            (m.confidence_score or Decimal('0.0')) < Decimal(str(settings.auto_post_confidence_threshold))
+            for m in matches
+            if m.is_selected
+        )
     )
 
     run.review_required_count = len(
-        [m for m in matches if m.is_selected and m.status in {MatchStatus.PARTIAL_MATCH, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW}]
+        [
+            m
+            for m in matches
+            if m.is_selected and m.status in {MatchStatus.PARTIAL_MATCH, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW}
+        ]
     )
 
     if requires_review:
@@ -254,16 +269,6 @@ def ingest_run(db: Session, tenant_code: str, business_date) -> IngestionRun:
         run.review_reason_code = extraction_reasons[0] if extraction_reasons else 'LOW_CONFIDENCE_OR_PARTIAL'
     else:
         run.status = RunStatus.READY_TO_POST
-
-    db.add(
-        MatchActionAudit(
-            run_id=run.id,
-            action='INGEST_RUN',
-            actor_id='system',
-            reason_code=run.review_reason_code,
-            comment='Ingestion completed',
-        )
-    )
 
     db.flush()
     return run
@@ -287,16 +292,6 @@ def approve_match(db: Session, match_id: UUID, actor_id: str | None, reason_code
     match.reviewed_at = datetime.utcnow()
     match.review_comment = comment
 
-    db.add(
-        MatchActionAudit(
-            run_id=match.run_id,
-            match_id=match.id,
-            action='APPROVE',
-            actor_id=match.reviewed_by,
-            reason_code=reason_code,
-            comment=comment,
-        )
-    )
     db.flush()
     return MatchActionResponse(
         match_id=str(match.id),
@@ -313,16 +308,6 @@ def reject_match(db: Session, match_id: UUID, actor_id: str | None, reason_code:
     match.reviewed_at = datetime.utcnow()
     match.review_comment = comment
 
-    db.add(
-        MatchActionAudit(
-            run_id=match.run_id,
-            match_id=match.id,
-            action='REJECT',
-            actor_id=match.reviewed_by,
-            reason_code=reason_code,
-            comment=comment,
-        )
-    )
     db.flush()
     return MatchActionResponse(
         match_id=str(match.id),
@@ -335,26 +320,17 @@ def reject_match(db: Session, match_id: UUID, actor_id: str | None, reason_code:
 def manual_link(
     db: Session,
     run_id: UUID,
-    bank_statement_line_id: UUID,
+    bank_statement_id: UUID,
     remittance_advice_line_id: UUID | None,
     actor_id: str | None,
     reason_code: str | None,
     comment: str | None,
 ) -> MatchActionResponse:
-    db.scalars(
-        select(ReconciliationMatch)
-        .where(
-            ReconciliationMatch.run_id == run_id,
-            ReconciliationMatch.bank_statement_line_id == bank_statement_line_id,
-            ReconciliationMatch.is_selected.is_(True),
-        )
-    ).all()
-
     for old in db.scalars(
         select(ReconciliationMatch)
         .where(
             ReconciliationMatch.run_id == run_id,
-            ReconciliationMatch.bank_statement_line_id == bank_statement_line_id,
+            ReconciliationMatch.bank_statement_id == bank_statement_id,
             ReconciliationMatch.is_selected.is_(True),
         )
     ):
@@ -362,7 +338,7 @@ def manual_link(
 
     manual = ReconciliationMatch(
         run_id=run_id,
-        bank_statement_line_id=bank_statement_line_id,
+        bank_statement_id=bank_statement_id,
         remittance_advice_line_id=remittance_advice_line_id,
         status=MatchStatus.APPROVED,
         match_rule='manual_link',
@@ -378,17 +354,6 @@ def manual_link(
     db.add(manual)
     db.flush()
 
-    db.add(
-        MatchActionAudit(
-            run_id=run_id,
-            match_id=manual.id,
-            action='MANUAL_LINK',
-            actor_id=manual.reviewed_by or 'analyst.demo',
-            reason_code=reason_code,
-            comment=comment,
-        )
-    )
-    db.flush()
     return MatchActionResponse(
         match_id=str(manual.id),
         status=manual.status.value,
@@ -397,7 +362,7 @@ def manual_link(
     )
 
 
-def post_journals(db: Session, run_id: UUID, actor_id: str | None) -> JournalEntryHeader:
+def post_journals(db: Session, run_id: UUID, actor_id: str | None) -> list[JournalEntry]:
     run = db.get(IngestionRun, run_id)
     if not run:
         raise ServiceError(f'Run {run_id} not found')
@@ -406,64 +371,104 @@ def post_journals(db: Session, run_id: UUID, actor_id: str | None) -> JournalEnt
         raise ServiceError(f'Run {run.id} is not ready for posting: {run.status.value}')
 
     selected = db.scalars(
-        select(ReconciliationMatch)
-        .where(ReconciliationMatch.run_id == run.id, ReconciliationMatch.is_selected.is_(True))
+        select(ReconciliationMatch).where(ReconciliationMatch.run_id == run.id, ReconciliationMatch.is_selected.is_(True))
     ).all()
 
-    blocking = [m for m in selected if m.status in {MatchStatus.REJECTED, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW}]
+    postable = [
+        m
+        for m in selected
+        if m.status in {MatchStatus.AUTO_MATCHED, MatchStatus.APPROVED, MatchStatus.PARTIAL_MATCH}
+        and m.remittance_advice_line_id is not None
+    ]
+    blocking = [m for m in selected if m.status in {MatchStatus.REJECTED, MatchStatus.MANUAL_REVIEW}]
     if blocking:
         raise ServiceError('Run has unresolved matches; cannot post journals')
+    if not postable:
+        raise ServiceError('Run has no postable remittance matches')
 
-    header = db.scalar(select(JournalEntryHeader).where(JournalEntryHeader.run_id == run.id))
-    if not header:
-        header = JournalEntryHeader(
-            run_id=run.id,
-            company_code='1000',
-            posting_date=run.business_date,
-            document_date=run.business_date,
-            document_type='SA',
-            currency='EUR',
-            source_file_name=f'run-{run.id}.json',
-        )
-        db.add(header)
+    posting_date = run.business_date
+    primary_bank = db.get(BankStatement, postable[0].bank_statement_id)
+    if primary_bank and primary_bank.booking_date:
+        posting_date = primary_bank.booking_date
+
+    existing_lines = db.scalars(select(JournalEntry).where(JournalEntry.run_id == run.id)).all()
+    if existing_lines:
+        run.status = RunStatus.POSTED
+        run.finished_at = datetime.utcnow()
         db.flush()
+        return existing_lines
 
-    existing_lines = db.scalars(select(JournalEntryLine).where(JournalEntryLine.journal_header_id == header.id)).all()
-    if not existing_lines:
-        line_no = 1
-        for match in selected:
-            bank_line = db.get(BankStatementLine, match.bank_statement_line_id)
-            if not bank_line:
-                continue
-            amount = abs(bank_line.amount)
-            debit = amount if bank_line.amount > 0 else None
-            credit = amount if bank_line.amount <= 0 else None
-            db.add(
-                JournalEntryLine(
-                    journal_header_id=header.id,
-                    line_number=line_no,
-                    gl_account='100000',
-                    debit=debit,
-                    credit=credit,
-                    currency=bank_line.currency,
-                    item_text=bank_line.customer_reference or bank_line.bank_reference or 'auto-posted',
-                    reconciliation_match_id=match.id,
-                    bank_statement_line_id=bank_line.id,
-                    remittance_advice_line_id=match.remittance_advice_line_id,
+    line_no = 1
+    created: list[JournalEntry] = []
+    used_bank_ids: set[UUID] = set()
+    for match in postable:
+        bank_row = db.get(BankStatement, match.bank_statement_id)
+        rem_line = db.get(RemittanceAdviceLine, match.remittance_advice_line_id) if match.remittance_advice_line_id else None
+        if not bank_row or not rem_line or rem_line.paid_amount is None:
+            continue
+        used_bank_ids.add(bank_row.id)
+
+        amount = abs(rem_line.paid_amount)
+        entry = JournalEntry(
+            run_id=run.id,
+            line_number=line_no,
+            company_code='1000',
+            posting_date=posting_date,
+            document_date=posting_date,
+            document_type='SA',
+            gl_account='100000',
+            debit=None,
+            credit=amount,
+            currency=rem_line.currency or bank_row.currency,
+            item_text=(
+                f'{rem_line.invoice_number}/{rem_line.customer_reference}'
+                if rem_line.invoice_number and rem_line.customer_reference
+                else (
+                    rem_line.invoice_number
+                    or rem_line.customer_reference
+                    or bank_row.customer_reference
+                    or bank_row.bank_reference
+                    or 'auto-posted'
                 )
-            )
-            line_no += 1
+            ),
+            source_file_name=f'run-{run.id}.json',
+            reconciliation_match_id=match.id,
+            bank_statement_id=bank_row.id,
+            remittance_advice_line_id=rem_line.id,
+        )
+        db.add(entry)
+        created.append(entry)
+        line_no += 1
+
+    unmatched_bank_rows = db.scalars(
+        select(BankStatement)
+        .where(BankStatement.blob_object_id == run.bank_blob_id)
+        .order_by(BankStatement.line_number.asc())
+    ).all()
+    for bank_row in unmatched_bank_rows:
+        if bank_row.id in used_bank_ids:
+            continue
+        amount = abs(bank_row.amount)
+        entry = JournalEntry(
+            run_id=run.id,
+            line_number=line_no,
+            company_code='1000',
+            posting_date=bank_row.booking_date or posting_date,
+            document_date=bank_row.booking_date or posting_date,
+            document_type='SA',
+            gl_account='100000',
+            debit=amount if bank_row.amount > 0 else None,
+            credit=amount if bank_row.amount < 0 else None,
+            currency=bank_row.currency,
+            item_text=bank_row.customer_reference or bank_row.bank_reference or 'unmatched-bank-line',
+            source_file_name=f'run-{run.id}.json',
+            bank_statement_id=bank_row.id,
+        )
+        db.add(entry)
+        created.append(entry)
+        line_no += 1
 
     run.status = RunStatus.POSTED
     run.finished_at = datetime.utcnow()
-    db.add(
-        MatchActionAudit(
-            run_id=run.id,
-            action='POST_JOURNALS',
-            actor_id=_actor(actor_id),
-            reason_code='POSTED',
-            comment='Journal entries posted',
-        )
-    )
     db.flush()
-    return header
+    return created

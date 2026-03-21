@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class IngestRunRequest(BaseModel):
@@ -52,7 +52,7 @@ class MatchDecisionRequest(BaseModel):
 
 
 class ManualLinkRequest(BaseModel):
-    bank_statement_line_id: str
+    bank_statement_id: str = Field(validation_alias=AliasChoices('bank_statement_id', 'bank_statement_line_id'))
     remittance_advice_line_id: str | None = None
     reason_code: str | None = None
     comment: str | None = None

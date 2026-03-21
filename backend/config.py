@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     llm_provider: str = 'gemini'
     google_api_key: str | None = None
-    gemini_model: str = 'gemini-2.0-flash'
+    gemini_model: str = 'gemini-flash-latest'
     llm_prompt_version: str = 'v1'
     auto_post_confidence_threshold: float = 0.9
 

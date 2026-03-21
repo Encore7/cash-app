@@ -13,9 +13,9 @@ from backend.db.base import Base
 from backend.models.enums import RunStatus, SourceType
 
 if TYPE_CHECKING:
-    from backend.models.bank import BankStatementHeader
-    from backend.models.journal import JournalEntryHeader
-    from backend.models.reconciliation import MatchActionAudit, ReconciliationMatch
+    from backend.models.bank import BankStatement
+    from backend.models.journal import JournalEntry
+    from backend.models.reconciliation import ReconciliationMatch
     from backend.models.remittance import RemittanceAdviceHeader
 
 
@@ -50,7 +50,7 @@ class BlobObject(Base):
     arrived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     tenant: Mapped[Tenant] = relationship(back_populates='blob_objects')
-    bank_statement_header: Mapped[BankStatementHeader | None] = relationship(back_populates='source_blob')
+    bank_statements: Mapped[list[BankStatement]] = relationship(back_populates='source_blob')
     remittance_advice_header: Mapped[RemittanceAdviceHeader | None] = relationship(
         back_populates='source_blob'
     )
@@ -58,6 +58,9 @@ class BlobObject(Base):
 
 class IngestionRun(Base):
     __tablename__ = 'ingestion_runs'
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'business_date', 'bank_blob_id', 'remittance_blob_id', name='uq_ingestion_run_slot'),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('tenants.id'), nullable=False)
@@ -75,5 +78,4 @@ class IngestionRun(Base):
 
     tenant: Mapped[Tenant] = relationship(back_populates='ingestion_runs')
     matches: Mapped[list[ReconciliationMatch]] = relationship(back_populates='run')
-    journal_entry_headers: Mapped[list[JournalEntryHeader]] = relationship(back_populates='run')
-    match_actions: Mapped[list[MatchActionAudit]] = relationship(back_populates='run')
+    journal_entries: Mapped[list[JournalEntry]] = relationship(back_populates='run')

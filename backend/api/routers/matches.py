@@ -55,7 +55,7 @@ def create_manual_link(
         resp = manual_link(
             db,
             run_id,
-            UUID(payload.bank_statement_line_id),
+            UUID(payload.bank_statement_id),
             UUID(payload.remittance_advice_line_id) if payload.remittance_advice_line_id else None,
             x_actor_id,
             payload.reason_code,

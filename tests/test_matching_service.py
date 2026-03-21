@@ -20,6 +20,6 @@ def test_generate_match_candidates_aggregate_and_selection() -> None:
 
     candidates = generate_match_candidates(bank_lines, remittance_lines)
     assert len(candidates) == 2
-    assert any(c['match_rule'] == 'aggregate_2_line_amount' for c in candidates)
+    assert any(c['match_rule'] in {'aggregate_2_line_amount', 'header_total_amount_exact'} for c in candidates)
     selected = [c for c in candidates if c['is_selected']]
-    assert len(selected) == 1
+    assert len(selected) == 2
