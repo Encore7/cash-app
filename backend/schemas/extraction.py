@@ -16,23 +16,24 @@ class RemittanceLineExtraction(BaseModel):
     deduction_amount: Decimal | None = None
     paid_amount: Decimal | None = None
     currency: str | None = None
-    customer_reference: str | None = None
+    buyer_reference: str | None = None
     assignment_text: str | None = None
-    raw_line_text: str = ''
 
 
 class RemittanceExtractionResult(BaseModel):
-    advice_number: str | None = None
+    buyer_reference: str | None = None
+    bank_reference: str | None = None
+    buyer_account_number: str | None = None
     advice_date: date | None = None
-    payer_name: str | None = None
+    buyer_name: str | None = None
     payer_iban: str | None = None
     payer_bic: str | None = None
     document_currency: str | None = None
     total_paid_amount: Decimal | None = None
-    document_language: str = 'de'
+    document_language: str = "de"
     remittance_subject: str | None = None
     raw_text: str | None = None
-    parsing_confidence: Decimal | None = Field(default=Decimal('0.0'))
+    parsing_confidence: Decimal | None = Field(default=Decimal("0.0"))
     lines: list[RemittanceLineExtraction] = Field(default_factory=list)
 
 

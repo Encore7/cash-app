@@ -18,11 +18,19 @@ if TYPE_CHECKING:
 
 
 class BankStatement(Base):
-    __tablename__ = 'bank_statement'
-    __table_args__ = (UniqueConstraint('blob_object_id', 'line_number', name='uq_bank_statement_line'),)
+    __tablename__ = "bank_statement"
+    __table_args__ = (
+        UniqueConstraint(
+            "blob_object_id", "line_number", name="uq_bank_statement_line"
+        ),
+    )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    blob_object_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('blob_objects.id'), nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    blob_object_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("blob_objects.id"), nullable=False
+    )
     line_number: Mapped[int] = mapped_column(nullable=False)
     booking_date: Mapped[date] = mapped_column(Date, nullable=False)
     value_date: Mapped[date | None] = mapped_column(Date)
@@ -30,9 +38,14 @@ class BankStatement(Base):
     counterparty_name: Mapped[str | None] = mapped_column(String(255))
     payment_purpose: Mapped[str | None] = mapped_column(Text)
     bank_reference: Mapped[str | None] = mapped_column(String(120))
-    customer_reference: Mapped[str | None] = mapped_column(String(120))
+    buyer_reference: Mapped[str | None] = mapped_column(String(120))
+    buyer_account_number: Mapped[str | None] = mapped_column(String(34))
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
 
-    source_blob: Mapped[BlobObject] = relationship(back_populates='bank_statements')
-    matches: Mapped[list[ReconciliationMatch]] = relationship(back_populates='bank_statement')
-    journal_entries: Mapped[list[JournalEntry]] = relationship(back_populates='bank_statement')
+    source_blob: Mapped[BlobObject] = relationship(back_populates="bank_statements")
+    matches: Mapped[list[ReconciliationMatch]] = relationship(
+        back_populates="bank_statement"
+    )
+    journal_entries: Mapped[list[JournalEntry]] = relationship(
+        back_populates="bank_statement"
+    )

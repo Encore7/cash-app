@@ -22,6 +22,8 @@ from backend.schemas.api import (
 
 # Active job progress queues — keyed by rule_id string
 _active_jobs: dict[str, _queue_module.SimpleQueue] = {}
+# Final message cache so reconnecting WebSocket clients can get the result
+_job_results: dict[str, dict] = {}
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -191,20 +193,29 @@ def trigger_rule(rule_id: UUID, db: Session = Depends(get_db)) -> dict:
     str_id = str(rule_id)
     q: _queue_module.SimpleQueue = _queue_module.SimpleQueue()
     _active_jobs[str_id] = q
+    _job_results.pop(str_id, None)
 
     from backend.jobs.runner import run_for_rule_with_progress
 
+    def _progress_cb(msg: dict) -> None:
+        if msg.get("type") in ("done", "error"):
+            _job_results[str_id] = msg
+        q.put(msg)
+
     def _worker() -> None:
         try:
-            run_for_rule_with_progress(str_id, q.put)
+            run_for_rule_with_progress(str_id, _progress_cb)
         except Exception as exc:
-            q.put({"type": "error", "message": str(exc)})
+            err_msg = {"type": "error", "message": str(exc)}
+            _job_results[str_id] = err_msg
+            q.put(err_msg)
         finally:
             # Keep queue alive for 60 s so a late WS connect can still drain it
             import time
 
             time.sleep(60)
             _active_jobs.pop(str_id, None)
+            _job_results.pop(str_id, None)
 
     threading.Thread(target=_worker, daemon=True).start()
     return {"status": "started", "rule_id": str_id}
@@ -217,11 +228,17 @@ async def job_progress_ws(websocket: WebSocket, rule_id: UUID) -> None:
     await websocket.accept()
     str_id = str(rule_id)
 
-    # Wait up to 5 s for the queue to be registered (handles slight timing gaps)
+    # Wait up to 5 s for the queue or a cached result to be available
     for _ in range(25):
-        if str_id in _active_jobs:
+        if str_id in _active_jobs or str_id in _job_results:
             break
         await asyncio.sleep(0.2)
+
+    # If the job already finished, send the cached final result immediately
+    if str_id in _job_results:
+        await websocket.send_json(_job_results[str_id])
+        await websocket.close()
+        return
 
     q = _active_jobs.get(str_id)
     if q is None:
@@ -233,6 +250,11 @@ async def job_progress_ws(websocket: WebSocket, rule_id: UUID) -> None:
 
     try:
         while True:
+            # Guard: if another WS handler already consumed the done/error message
+            # from the queue, retrieve the cached result so this client doesn't hang.
+            if str_id in _job_results:
+                await websocket.send_json(_job_results[str_id])
+                break
             try:
                 msg = q.get_nowait()
                 await websocket.send_json(msg)

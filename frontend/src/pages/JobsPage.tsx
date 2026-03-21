@@ -77,12 +77,15 @@ export default function JobsPage() {
     const wsRefs = useRef<Record<string, WebSocket>>({})
     // Always holds the latest jobProgress so the cleanup closure isn't stale
     const jobProgressRef = useRef<Record<string, JobProgress>>({})
+    // Track mount state to avoid calling openWs after the component is gone
+    const mountedRef = useRef(true)
 
     useEffect(() => {
         jobProgressRef.current = jobProgress
     }, [jobProgress])
 
     useEffect(() => {
+        mountedRef.current = true
         fetchRules()
         fetchTenants()
         // Restore any jobs that were running when the user navigated away
@@ -109,6 +112,7 @@ export default function JobsPage() {
             // Close all sockets – they'll be reopened on next mount
             Object.values(wsRefs.current).forEach(ws => { try { ws.close() } catch { /* ignore */ } })
             wsRefs.current = {}
+            mountedRef.current = false
         }
     }, [])
 
@@ -219,6 +223,8 @@ export default function JobsPage() {
             return
         }
 
+        // Don't open a WS if the component was unmounted while the POST was in flight
+        if (!mountedRef.current) return
         openWs(id)
     }
 

@@ -61,7 +61,6 @@ class BlobObject(Base):
     blob_path: Mapped[str] = mapped_column(String(512), nullable=False)
     original_file_name: Mapped[str | None] = mapped_column(String(255))
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    etag: Mapped[str | None] = mapped_column(String(128))
     size_bytes: Mapped[int | None] = mapped_column()
     arrived_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow

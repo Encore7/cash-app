@@ -182,9 +182,11 @@ def _persist_remittance_data(
     normalized = report.normalized
     header = RemittanceAdviceHeader(
         blob_object_id=blob_object.id,
-        advice_number=normalized.advice_number,
+        buyer_reference=normalized.buyer_reference,
+        bank_reference=normalized.bank_reference,
+        buyer_account_number=normalized.buyer_account_number,
         advice_date=normalized.advice_date,
-        payer_name=normalized.payer_name,
+        buyer_name=normalized.buyer_name,
         document_currency=normalized.document_currency,
         total_paid_amount=normalized.total_paid_amount,
     )
@@ -200,8 +202,7 @@ def _persist_remittance_data(
                 "invoice_date",
                 "paid_amount",
                 "currency",
-                "customer_reference",
-                "raw_line_text",
+                "buyer_reference",
             }
         )
         line = RemittanceAdviceLine(advice_header_id=header.id, **line_payload)
@@ -228,7 +229,7 @@ def _persist_matches(
             "id": str(row.id),
             "amount": row.amount,
             "bank_reference": row.bank_reference,
-            "customer_reference": row.customer_reference,
+            "buyer_reference": row.buyer_reference,
             "payment_purpose": row.payment_purpose,
         }
         for row in bank_rows
@@ -346,8 +347,8 @@ def _generate_journal_entries(
                 if rl:
                     if rl.invoice_number:
                         parts.append(rl.invoice_number)
-                    if rl.customer_reference:
-                        parts.append(rl.customer_reference)
+                    if rl.buyer_reference:
+                        parts.append(rl.buyer_reference)
                 item_text: str | None = "/".join(parts)[:255] or None
 
                 db.add(
@@ -376,8 +377,8 @@ def _generate_journal_entries(
             parts = []
             if bank.bank_reference:
                 parts.append(bank.bank_reference)
-            elif bank.customer_reference:
-                parts.append(bank.customer_reference)
+            elif bank.buyer_reference:
+                parts.append(bank.buyer_reference)
             item_text = "/".join(parts)[:255] or None
 
             plain_match = plain_match_by_bank.get(bank.id)
@@ -806,12 +807,12 @@ def post_journals(
             credit=amount,
             currency=rem_line.currency or bank_row.currency,
             item_text=(
-                f"{rem_line.invoice_number}/{rem_line.customer_reference}"
-                if rem_line.invoice_number and rem_line.customer_reference
+                f"{rem_line.invoice_number}/{rem_line.buyer_reference}"
+                if rem_line.invoice_number and rem_line.buyer_reference
                 else (
                     rem_line.invoice_number
-                    or rem_line.customer_reference
-                    or bank_row.customer_reference
+                    or rem_line.buyer_reference
+                    or bank_row.buyer_reference
                     or bank_row.bank_reference
                     or "auto-posted"
                 )
@@ -845,7 +846,7 @@ def post_journals(
             debit=amount if bank_row.amount > 0 else None,
             credit=amount if bank_row.amount < 0 else None,
             currency=bank_row.currency,
-            item_text=bank_row.customer_reference
+            item_text=bank_row.buyer_reference
             or bank_row.bank_reference
             or "unmatched-bank-line",
             source_file_name=f"run-{run.id}.json",

@@ -72,7 +72,7 @@ interface Match {
     remittance_invoice_number: string | null
     remittance_paid_amount: number | null
     remittance_currency: string | null
-    remittance_customer_reference: string | null
+    remittance_buyer_reference: string | null
 }
 
 interface BankStatement {
@@ -85,7 +85,8 @@ interface BankStatement {
     counterparty_name: string | null
     payment_purpose: string | null
     bank_reference: string | null
-    customer_reference: string | null
+    buyer_reference: string | null
+    buyer_account_number: string | null
 }
 
 interface RemittanceLine {
@@ -95,15 +96,16 @@ interface RemittanceLine {
     invoice_date: string | null
     paid_amount: number | null
     currency: string | null
-    customer_reference: string | null
-    raw_line_text: string
+    buyer_reference: string | null
 }
 
 interface RemittanceHeader {
     id: string
-    advice_number: string | null
+    buyer_reference: string | null
+    bank_reference: string | null
+    buyer_account_number: string | null
     advice_date: string | null
-    payer_name: string | null
+    buyer_name: string | null
     document_currency: string | null
     total_paid_amount: number | null
     lines: RemittanceLine[]
@@ -327,7 +329,8 @@ export default function AnalyticsPage() {
         { field: 'currency', headerName: 'Ccy', width: 90 },
         { field: 'counterparty_name', headerName: 'Counterparty', width: 180, valueGetter: (_v, r) => r.counterparty_name ?? '–' },
         { field: 'bank_reference', headerName: 'Bank Ref', width: 160, valueGetter: (_v, r) => r.bank_reference ?? '–' },
-        { field: 'customer_reference', headerName: 'Customer Ref', width: 160, valueGetter: (_v, r) => r.customer_reference ?? '–' },
+        { field: 'buyer_reference', headerName: 'Buyer Ref', width: 160, valueGetter: (_v, r) => r.buyer_reference ?? '–' },
+        { field: 'buyer_account_number', headerName: 'Acct #', width: 140, valueGetter: (_v, r) => r.buyer_account_number ?? '–' },
         { field: 'payment_purpose', headerName: 'Purpose', minWidth: 220, flex: 1, valueGetter: (_v, r) => r.payment_purpose ?? '–' },
     ], [])
 
@@ -337,8 +340,7 @@ export default function AnalyticsPage() {
         { field: 'invoice_date', headerName: 'Invoice Date', width: 120, valueGetter: (_v, r) => r.invoice_date ?? '–' },
         { field: 'paid_amount', headerName: 'Paid Amount', width: 130, valueGetter: (_v, r) => fmt(r.paid_amount) },
         { field: 'currency', headerName: 'Ccy', width: 80, valueGetter: (_v, r) => r.currency ?? '–' },
-        { field: 'customer_reference', headerName: 'Customer Ref', width: 150, valueGetter: (_v, r) => r.customer_reference ?? '–' },
-        { field: 'raw_line_text', headerName: 'Raw Text', minWidth: 250, flex: 1 },
+        { field: 'buyer_reference', headerName: 'Buyer Ref', width: 150, valueGetter: (_v, r) => r.buyer_reference ?? '–' },
     ], [])
 
     if (loading) {
@@ -482,9 +484,9 @@ export default function AnalyticsPage() {
                                 <TableHead>
                                     <TableRow sx={{ bgcolor: 'action.hover' }}>
                                         <TableCell sx={{ width: 48, p: 0.5 }} />
-                                        <TableCell>Advice #</TableCell>
+                                        <TableCell>Buyer Ref</TableCell>
                                         <TableCell>Date</TableCell>
-                                        <TableCell>Payer</TableCell>
+                                        <TableCell>Buyer</TableCell>
                                         <TableCell>Total Paid</TableCell>
                                         <TableCell sx={{ width: 70 }}>Lines</TableCell>
                                     </TableRow>
@@ -506,9 +508,9 @@ export default function AnalyticsPage() {
                                                                 : <KeyboardArrowDownIcon fontSize='small' />}
                                                         </IconButton>
                                                     </TableCell>
-                                                    <TableCell>{hdr.advice_number ?? '–'}</TableCell>
+                                                    <TableCell>{hdr.buyer_reference ?? '–'}</TableCell>
                                                     <TableCell>{hdr.advice_date ?? '–'}</TableCell>
-                                                    <TableCell>{hdr.payer_name ?? '–'}</TableCell>
+                                                    <TableCell>{hdr.buyer_name ?? '–'}</TableCell>
                                                     <TableCell>{fmt(hdr.total_paid_amount, hdr.document_currency)}</TableCell>
                                                     <TableCell>{Array.isArray(hdr.lines) ? hdr.lines.length : 0}</TableCell>
                                                 </TableRow>

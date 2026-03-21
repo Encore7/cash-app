@@ -163,9 +163,7 @@ def get_matches(
                     else None
                 ),
                 "remittance_currency": ral.currency if ral else None,
-                "remittance_customer_reference": (
-                    ral.customer_reference if ral else None
-                ),
+                "remittance_buyer_reference": (ral.buyer_reference if ral else None),
             }
         )
     return result
@@ -193,7 +191,8 @@ def get_bank_statements(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
             "counterparty_name": r.counterparty_name,
             "payment_purpose": r.payment_purpose,
             "bank_reference": r.bank_reference,
-            "customer_reference": r.customer_reference,
+            "buyer_reference": r.buyer_reference,
+            "buyer_account_number": r.buyer_account_number,
         }
         for r in records
     ]
@@ -217,9 +216,11 @@ def get_remittance_headers(db: Session = Depends(get_db)) -> list[dict[str, Any]
             {
                 "id": str(h.id),
                 "blob_object_id": str(h.blob_object_id),
-                "advice_number": h.advice_number,
+                "buyer_reference": h.buyer_reference,
+                "bank_reference": h.bank_reference,
+                "buyer_account_number": h.buyer_account_number,
                 "advice_date": h.advice_date.isoformat() if h.advice_date else None,
-                "payer_name": h.payer_name,
+                "buyer_name": h.buyer_name,
                 "document_currency": h.document_currency,
                 "total_paid_amount": (
                     float(h.total_paid_amount)
@@ -240,8 +241,7 @@ def get_remittance_headers(db: Session = Depends(get_db)) -> list[dict[str, Any]
                             else None
                         ),
                         "currency": ln.currency,
-                        "customer_reference": ln.customer_reference,
-                        "raw_line_text": ln.raw_line_text,
+                        "buyer_reference": ln.buyer_reference,
                     }
                     for ln in sorted(h.lines, key=lambda x: x.line_number)
                 ],
