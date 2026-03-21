@@ -8,6 +8,11 @@ import {
     Chip,
     CircularProgress,
     Collapse,
+    Dialog,
+    DialogActions,
+    DialogContent,
+    DialogTitle,
+    Divider,
     Grid,
     IconButton,
     Paper,
@@ -20,10 +25,13 @@ import {
     TableHead,
     TableRow,
     Tabs,
+    Tooltip,
     Typography,
 } from '@mui/material'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp'
+import DownloadIcon from '@mui/icons-material/Download'
+import FindInPageIcon from '@mui/icons-material/FindInPage'
 import { DataGrid, GridColDef, GridFilterModel, GridRenderCellParams } from '@mui/x-data-grid'
 import { PieChart } from '@mui/x-charts/PieChart'
 
@@ -111,6 +119,408 @@ interface RemittanceHeader {
     lines: RemittanceLine[]
 }
 
+// ---------------------------------------------------------------------------
+// Evidence dialog types
+// ---------------------------------------------------------------------------
+
+interface EvidenceMatchMeta {
+    id: string
+    status: string
+    confidence_score: number
+    match_rule: string
+    amount_applied: number | null
+    variance_amount: number | null
+    source: string
+    is_selected: boolean
+    notes: string | null
+    reviewed_by: string | null
+    reviewed_at: string | null
+    review_comment: string | null
+}
+
+interface EvidenceBankStatement {
+    id: string
+    blob_object_id: string
+    line_number: number
+    booking_date: string
+    value_date: string | null
+    amount: number
+    currency: string
+    counterparty_name: string | null
+    payment_purpose: string | null
+    bank_reference: string | null
+    buyer_reference: string | null
+    buyer_account_number: string | null
+    source_file_name: string | null
+}
+
+interface EvidenceRemittanceLine {
+    id: string
+    line_number: number
+    invoice_number: string | null
+    invoice_date: string | null
+    paid_amount: number | null
+    currency: string | null
+    buyer_reference: string | null
+}
+
+interface EvidenceRemittanceHeader {
+    id: string
+    blob_object_id: string
+    buyer_reference: string | null
+    bank_reference: string | null
+    buyer_account_number: string | null
+    advice_date: string | null
+    buyer_name: string | null
+    document_currency: string | null
+    total_paid_amount: number | null
+    source_file_name: string | null
+}
+
+interface EvidenceData {
+    match: EvidenceMatchMeta
+    bank_statement: EvidenceBankStatement | null
+    remittance_line: EvidenceRemittanceLine | null
+    remittance_header: EvidenceRemittanceHeader | null
+}
+
+// ---------------------------------------------------------------------------
+// EvidenceDialog component
+// ---------------------------------------------------------------------------
+
+function FieldRow({
+    label,
+    value,
+    highlight,
+}: {
+    label: string
+    value: React.ReactNode
+    highlight?: boolean
+}) {
+    return (
+        <Box
+            display='flex'
+            alignItems='flex-start'
+            sx={{
+                py: 0.6,
+                px: 1,
+                borderRadius: 1,
+                bgcolor: highlight ? 'success.50' : 'transparent',
+                border: highlight ? '1px solid' : '1px solid transparent',
+                borderColor: highlight ? 'success.200' : 'transparent',
+            }}
+        >
+            <Typography
+                variant='caption'
+                color='text.secondary'
+                sx={{ width: 148, flexShrink: 0, pt: 0.1 }}
+            >
+                {label}
+            </Typography>
+            <Typography
+                variant='body2'
+                fontWeight={highlight ? 600 : 400}
+                color={highlight ? 'success.dark' : 'text.primary'}
+                sx={{ wordBreak: 'break-word' }}
+            >
+                {value ?? '–'}
+            </Typography>
+        </Box>
+    )
+}
+
+function normRef(v: string | null | undefined) {
+    return (v ?? '').trim().toLowerCase()
+}
+
+function refsMatch(a: string | null | undefined, b: string | null | undefined) {
+    const na = normRef(a)
+    const nb = normRef(b)
+    return na.length > 0 && nb.length > 0 && na === nb
+}
+
+interface EvidenceDialogProps {
+    matchId: string | null
+    open: boolean
+    onClose: () => void
+}
+
+function EvidenceDialog({ matchId, open, onClose }: EvidenceDialogProps) {
+    const [data, setData] = useState<EvidenceData | null>(null)
+    const [loading, setLoading] = useState(false)
+
+    useEffect(() => {
+        if (!open || !matchId) { setData(null); return }
+        setLoading(true)
+        axios
+            .get<EvidenceData>(`${API}/analytics/matches/${matchId}/evidence`)
+            .then((r) => setData(r.data))
+            .catch(() => setData(null))
+            .finally(() => setLoading(false))
+    }, [open, matchId])
+
+    function handleDownload(blobId: string) {
+        window.open(`${API}/analytics/blobs/${blobId}/download`, '_blank')
+    }
+
+    const bs = data?.bank_statement
+    const ral = data?.remittance_line
+    const rah = data?.remittance_header
+    const match = data?.match
+
+    return (
+        <Dialog open={open} onClose={onClose} maxWidth='lg' fullWidth scroll='paper'>
+            <DialogTitle sx={{ pb: 1 }}>
+                <Box display='flex' alignItems='center' gap={1} flexWrap='wrap'>
+                    <Typography variant='h6' component='span'>
+                        Match Evidence
+                    </Typography>
+                    {match && (
+                        <>
+                            <Chip size='small' label={match.match_rule} variant='outlined' />
+                            <Chip
+                                size='small'
+                                label={`${(match.confidence_score * 100).toFixed(1)}% confidence`}
+                                color='primary'
+                                variant='outlined'
+                            />
+                            <Chip
+                                size='small'
+                                label={match.status}
+                                color={STATUS_COLORS[match.status] ?? 'default'}
+                            />
+                            {match.variance_amount != null && match.variance_amount !== 0 && (
+                                <Chip
+                                    size='small'
+                                    label={`Variance: ${fmt(match.variance_amount)}`}
+                                    color='warning'
+                                    variant='outlined'
+                                />
+                            )}
+                        </>
+                    )}
+                </Box>
+            </DialogTitle>
+
+            <DialogContent dividers>
+                {loading ? (
+                    <Box display='flex' justifyContent='center' py={5}>
+                        <CircularProgress />
+                    </Box>
+                ) : data ? (
+                    <Grid container spacing={2}>
+                        {/* ── Remittance Advice ─────────────────────── */}
+                        <Grid size={{ xs: 12, md: 6 }}>
+                            <Paper
+                                variant='outlined'
+                                sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}
+                            >
+                                <Typography variant='subtitle1' fontWeight={700} mb={1}>
+                                    Remittance Advice
+                                </Typography>
+
+                                {rah ? (
+                                    <>
+                                        <Typography
+                                            variant='overline'
+                                            color='text.secondary'
+                                            display='block'
+                                            mb={0.5}
+                                        >
+                                            Header
+                                        </Typography>
+                                        <Divider sx={{ mb: 1 }} />
+                                        <FieldRow label='Buyer Name' value={rah.buyer_name} />
+                                        <FieldRow
+                                            label='Buyer Reference'
+                                            value={rah.buyer_reference}
+                                            highlight={refsMatch(rah.buyer_reference, bs?.buyer_reference)}
+                                        />
+                                        <FieldRow
+                                            label='Bank Reference'
+                                            value={rah.bank_reference}
+                                            highlight={refsMatch(rah.bank_reference, bs?.bank_reference)}
+                                        />
+                                        <FieldRow
+                                            label='Buyer Account'
+                                            value={rah.buyer_account_number}
+                                            highlight={refsMatch(
+                                                rah.buyer_account_number,
+                                                bs?.buyer_account_number,
+                                            )}
+                                        />
+                                        <FieldRow label='Advice Date' value={rah.advice_date} />
+                                        <FieldRow
+                                            label='Total Paid'
+                                            value={fmt(rah.total_paid_amount, rah.document_currency)}
+                                            highlight={
+                                                rah.total_paid_amount != null &&
+                                                bs != null &&
+                                                Math.abs(Math.abs(rah.total_paid_amount) - Math.abs(bs.amount)) <= 0.02
+                                            }
+                                        />
+                                    </>
+                                ) : (
+                                    <Typography color='text.secondary' variant='body2'>
+                                        No remittance header linked.
+                                    </Typography>
+                                )}
+
+                                {ral ? (
+                                    <>
+                                        <Typography
+                                            variant='overline'
+                                            color='text.secondary'
+                                            display='block'
+                                            mt={2}
+                                            mb={0.5}
+                                        >
+                                            Matched Line #{ral.line_number}
+                                        </Typography>
+                                        <Divider sx={{ mb: 1 }} />
+                                        <FieldRow label='Invoice Number' value={ral.invoice_number} />
+                                        <FieldRow label='Invoice Date' value={ral.invoice_date} />
+                                        <FieldRow
+                                            label='Paid Amount'
+                                            value={fmt(ral.paid_amount, ral.currency)}
+                                        />
+                                        <FieldRow label='Currency' value={ral.currency} />
+                                        <FieldRow
+                                            label='Buyer Reference'
+                                            value={ral.buyer_reference}
+                                            highlight={refsMatch(ral.buyer_reference, bs?.buyer_reference)}
+                                        />
+                                    </>
+                                ) : (
+                                    <Box mt={2}>
+                                        <Typography color='text.secondary' variant='body2'>
+                                            No remittance line matched.
+                                        </Typography>
+                                    </Box>
+                                )}
+
+                                <Box mt='auto' pt={2}>
+                                    {rah ? (
+                                        <Button
+                                            size='small'
+                                            variant='outlined'
+                                            startIcon={<DownloadIcon />}
+                                            onClick={() => handleDownload(rah.blob_object_id)}
+                                        >
+                                            Download{rah.source_file_name ? `: ${rah.source_file_name}` : ' Remittance'}
+                                        </Button>
+                                    ) : (
+                                        <Button size='small' variant='outlined' startIcon={<DownloadIcon />} disabled>
+                                            No document
+                                        </Button>
+                                    )}
+                                </Box>
+                            </Paper>
+                        </Grid>
+
+                        {/* ── Bank Statement ────────────────────────── */}
+                        <Grid size={{ xs: 12, md: 6 }}>
+                            <Paper
+                                variant='outlined'
+                                sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}
+                            >
+                                <Typography variant='subtitle1' fontWeight={700} mb={1}>
+                                    Bank Statement
+                                </Typography>
+
+                                {bs ? (
+                                    <>
+                                        <Typography
+                                            variant='overline'
+                                            color='text.secondary'
+                                            display='block'
+                                            mb={0.5}
+                                        >
+                                            Line #{bs.line_number}
+                                        </Typography>
+                                        <Divider sx={{ mb: 1 }} />
+                                        <FieldRow label='Booking Date' value={bs.booking_date} />
+                                        <FieldRow label='Value Date' value={bs.value_date} />
+                                        <FieldRow
+                                            label='Amount'
+                                            value={fmt(bs.amount, bs.currency)}
+                                            highlight={
+                                                bs.amount != null &&
+                                                rah != null &&
+                                                rah.total_paid_amount != null &&
+                                                Math.abs(Math.abs(bs.amount) - Math.abs(rah.total_paid_amount)) <= 0.02
+                                            }
+                                        />
+                                        <FieldRow label='Currency' value={bs.currency} />
+                                        <FieldRow
+                                            label='Counterparty'
+                                            value={bs.counterparty_name}
+                                        />
+                                        <FieldRow
+                                            label='Bank Reference'
+                                            value={bs.bank_reference}
+                                            highlight={refsMatch(rah?.bank_reference, bs.bank_reference)}
+                                        />
+                                        <FieldRow
+                                            label='Buyer Reference'
+                                            value={bs.buyer_reference}
+                                            highlight={
+                                                refsMatch(rah?.buyer_reference, bs.buyer_reference) ||
+                                                refsMatch(ral?.buyer_reference, bs.buyer_reference)
+                                            }
+                                        />
+                                        <FieldRow
+                                            label='Buyer Account'
+                                            value={bs.buyer_account_number}
+                                            highlight={refsMatch(
+                                                rah?.buyer_account_number,
+                                                bs.buyer_account_number,
+                                            )}
+                                        />
+                                        <FieldRow
+                                            label='Payment Purpose'
+                                            value={bs.payment_purpose}
+                                        />
+                                    </>
+                                ) : (
+                                    <Typography color='text.secondary' variant='body2'>
+                                        No bank statement data.
+                                    </Typography>
+                                )}
+
+                                <Box mt='auto' pt={2}>
+                                    {bs ? (
+                                        <Button
+                                            size='small'
+                                            variant='outlined'
+                                            startIcon={<DownloadIcon />}
+                                            onClick={() => handleDownload(bs.blob_object_id)}
+                                        >
+                                            Download{bs.source_file_name ? `: ${bs.source_file_name}` : ' Bank Statement'}
+                                        </Button>
+                                    ) : (
+                                        <Button size='small' variant='outlined' startIcon={<DownloadIcon />} disabled>
+                                            No document
+                                        </Button>
+                                    )}
+                                </Box>
+                            </Paper>
+                        </Grid>
+                    </Grid>
+                ) : (
+                    <Typography color='text.secondary' py={3} textAlign='center'>
+                        No evidence data available.
+                    </Typography>
+                )}
+            </DialogContent>
+
+            <DialogActions>
+                <Button onClick={onClose}>Close</Button>
+            </DialogActions>
+        </Dialog>
+    )
+}
+
 const STATUS_COLORS: Record<string, 'success' | 'error' | 'warning' | 'default'> = {
     AUTO_MATCHED: 'success',
     APPROVED: 'success',
@@ -148,6 +558,8 @@ export default function AnalyticsPage() {
 
     const [loading, setLoading] = useState(true)
     const [actionLoading, setActionLoading] = useState<string | null>(null)
+    const [evidenceOpen, setEvidenceOpen] = useState(false)
+    const [evidenceMatchId, setEvidenceMatchId] = useState<string | null>(null)
 
     const loadData = () => {
         return Promise.all([
@@ -290,6 +702,27 @@ export default function AnalyticsPage() {
             valueGetter: (_v, r) => fmt(r.remittance_paid_amount, r.remittance_currency),
         },
         { field: 'variance_amount', headerName: 'Variance', width: 120, valueGetter: (_v, r) => fmt(r.variance_amount) },
+        {
+            field: 'evidence',
+            headerName: 'Evidence',
+            width: 70,
+            sortable: false,
+            filterable: false,
+            renderCell: (params: GridRenderCellParams<Match>) => (
+                <Tooltip title='View match evidence'>
+                    <IconButton
+                        size='small'
+                        color='info'
+                        onClick={() => {
+                            setEvidenceMatchId(params.row.id)
+                            setEvidenceOpen(true)
+                        }}
+                    >
+                        <FindInPageIcon fontSize='small' />
+                    </IconButton>
+                </Tooltip>
+            ),
+        },
         {
             field: 'actions',
             headerName: 'Actions',
@@ -551,6 +984,12 @@ export default function AnalyticsPage() {
                     )}
                 </Paper>
             )}
+
+            <EvidenceDialog
+                matchId={evidenceMatchId}
+                open={evidenceOpen}
+                onClose={() => setEvidenceOpen(false)}
+            />
         </Box>
     )
 }

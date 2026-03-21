@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import io
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from azure.storage.blob import BlobServiceClient
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql.functions import count
 
+from backend.config import settings
 from backend.db.deps import get_db
 from backend.models.bank import BankStatement
-from backend.models.core import IngestionRun, Tenant
+from backend.models.core import BlobObject, IngestionRun, Tenant
 from backend.models.enums import MatchStatus
 from backend.models.journal import JournalEntry
 from backend.models.reconciliation import ReconciliationMatch
-from backend.models.remittance import RemittanceAdviceHeader
+from backend.models.remittance import RemittanceAdviceHeader, RemittanceAdviceLine
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -281,6 +285,164 @@ def mark_unmatched(
     match.reviewed_at = datetime.utcnow()
     db.commit()
     return {"id": str(match.id), "status": match.status}
+
+
+# ---------------------------------------------------------------------------
+# Match evidence detail
+# ---------------------------------------------------------------------------
+
+
+@router.get("/matches/{match_id}/evidence")
+def get_match_evidence(
+    match_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return full side-by-side evidence for a single reconciliation match."""
+    match = db.scalar(
+        select(ReconciliationMatch)
+        .options(
+            selectinload(ReconciliationMatch.bank_statement).selectinload(
+                BankStatement.source_blob
+            ),
+            selectinload(ReconciliationMatch.remittance_advice_line)
+            .selectinload(RemittanceAdviceLine.advice_header)
+            .selectinload(RemittanceAdviceHeader.source_blob),
+        )
+        .where(ReconciliationMatch.id == match_id)
+    )
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
+
+    bs = match.bank_statement
+    ral = match.remittance_advice_line
+    rah = ral.advice_header if ral else None
+
+    return {
+        "match": {
+            "id": str(match.id),
+            "status": match.status,
+            "confidence_score": float(match.confidence_score),
+            "match_rule": match.match_rule,
+            "amount_applied": (
+                float(match.amount_applied)
+                if match.amount_applied is not None
+                else None
+            ),
+            "variance_amount": (
+                float(match.variance_amount)
+                if match.variance_amount is not None
+                else None
+            ),
+            "source": match.source,
+            "is_selected": match.is_selected,
+            "notes": match.notes,
+            "reviewed_by": match.reviewed_by,
+            "reviewed_at": match.reviewed_at.isoformat() if match.reviewed_at else None,
+            "review_comment": match.review_comment,
+        },
+        "bank_statement": (
+            {
+                "id": str(bs.id),
+                "blob_object_id": str(bs.blob_object_id),
+                "line_number": bs.line_number,
+                "booking_date": bs.booking_date.isoformat(),
+                "value_date": bs.value_date.isoformat() if bs.value_date else None,
+                "amount": float(bs.amount),
+                "currency": bs.currency,
+                "counterparty_name": bs.counterparty_name,
+                "payment_purpose": bs.payment_purpose,
+                "bank_reference": bs.bank_reference,
+                "buyer_reference": bs.buyer_reference,
+                "buyer_account_number": bs.buyer_account_number,
+                "source_file_name": (
+                    bs.source_blob.original_file_name if bs.source_blob else None
+                ),
+            }
+            if bs
+            else None
+        ),
+        "remittance_line": (
+            {
+                "id": str(ral.id),
+                "line_number": ral.line_number,
+                "invoice_number": ral.invoice_number,
+                "invoice_date": (
+                    ral.invoice_date.isoformat() if ral.invoice_date else None
+                ),
+                "paid_amount": (
+                    float(ral.paid_amount) if ral.paid_amount is not None else None
+                ),
+                "currency": ral.currency,
+                "buyer_reference": ral.buyer_reference,
+            }
+            if ral
+            else None
+        ),
+        "remittance_header": (
+            {
+                "id": str(rah.id),
+                "blob_object_id": str(rah.blob_object_id),
+                "buyer_reference": rah.buyer_reference,
+                "bank_reference": rah.bank_reference,
+                "buyer_account_number": rah.buyer_account_number,
+                "advice_date": rah.advice_date.isoformat() if rah.advice_date else None,
+                "buyer_name": rah.buyer_name,
+                "document_currency": rah.document_currency,
+                "total_paid_amount": (
+                    float(rah.total_paid_amount)
+                    if rah.total_paid_amount is not None
+                    else None
+                ),
+                "source_file_name": (
+                    rah.source_blob.original_file_name if rah.source_blob else None
+                ),
+            }
+            if rah
+            else None
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Blob document download
+# ---------------------------------------------------------------------------
+
+
+@router.get("/blobs/{blob_id}/download")
+def download_blob(
+    blob_id: UUID,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """Stream the raw source file from Azure Blob Storage."""
+    blob_obj = db.get(BlobObject, blob_id)
+    if not blob_obj:
+        raise HTTPException(status_code=404, detail="Blob not found")
+
+    try:
+        client = BlobServiceClient.from_connection_string(
+            settings.azurite_connection_string
+        )
+        container_client = client.get_container_client(blob_obj.container_name)
+        data = container_client.download_blob(blob_obj.blob_path).readall()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to fetch blob from storage: {exc}"
+        ) from exc
+
+    file_name = blob_obj.original_file_name or blob_obj.blob_path.split("/")[-1]
+    if file_name.lower().endswith(".pdf"):
+        media_type = "application/pdf"
+    elif file_name.lower().endswith(".xlsx"):
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        media_type = "application/octet-stream"
+
+    safe_name = file_name.replace('"', "'")
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
 
 
 # ---------------------------------------------------------------------------

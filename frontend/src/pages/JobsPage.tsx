@@ -90,24 +90,28 @@ export default function JobsPage() {
         fetchTenants()
         // Restore any jobs that were running when the user navigated away
         const saved = sessionStorage.getItem('runningJobIds')
+        const savedProgress = sessionStorage.getItem('runningJobProgress')
         if (saved) {
             sessionStorage.removeItem('runningJobIds')
+            sessionStorage.removeItem('runningJobProgress')
             const ids: string[] = JSON.parse(saved)
+            const prevState: Record<string, JobProgress> = savedProgress ? JSON.parse(savedProgress) : {}
             ids.forEach(id => {
-                setJobProgress(prev => ({
-                    ...prev,
-                    [id]: prev[id] ?? { percent: 0, step: 'Reconnecting…', status: 'running' },
-                }))
+                // Restore last-known progress (keeps the % visible while WS reconnects)
+                const lastKnown = prevState[id] ?? { percent: 0, step: 'Reconnecting…', status: 'running' as const }
+                setJobProgress(prev => ({ ...prev, [id]: { ...lastKnown, step: lastKnown.step || 'Reconnecting…' } }))
                 openWs(id)
             })
         }
         return () => {
-            // Save running IDs so we can reconnect when the page is visited again
-            const running = Object.entries(jobProgressRef.current)
+            // Save running jobs + their last-known progress so we can restore on re-mount
+            const runningEntries = Object.entries(jobProgressRef.current)
                 .filter(([, jp]) => jp.status === 'running')
-                .map(([id]) => id)
-            if (running.length > 0) {
-                sessionStorage.setItem('runningJobIds', JSON.stringify(running))
+            if (runningEntries.length > 0) {
+                const ids = runningEntries.map(([id]) => id)
+                const state: Record<string, JobProgress> = Object.fromEntries(runningEntries)
+                sessionStorage.setItem('runningJobIds', JSON.stringify(ids))
+                sessionStorage.setItem('runningJobProgress', JSON.stringify(state))
             }
             // Close all sockets – they'll be reopened on next mount
             Object.values(wsRefs.current).forEach(ws => { try { ws.close() } catch { /* ignore */ } })

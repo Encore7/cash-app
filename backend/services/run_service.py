@@ -17,7 +17,7 @@ from backend.models.journal import JournalEntry
 from backend.models.reconciliation import ReconciliationMatch
 from backend.models.remittance import RemittanceAdviceHeader, RemittanceAdviceLine
 from backend.schemas.api import MatchActionResponse
-from backend.services.matching_service import generate_match_candidates
+from backend.services.matching_service import match_bank_to_remittance
 from backend.services.parsing_service import parse_bank_statement, parse_remittance
 from backend.utils.blob import build_blob_prefix, sha256_bytes
 
@@ -224,26 +224,56 @@ def _persist_matches(
     if existing:
         return existing
 
+    # Load the remittance advice headers referenced by these lines
+    header_ids = {line.advice_header_id for line in rem_lines}
+    headers: list[RemittanceAdviceHeader] = (
+        list(
+            db.scalars(
+                select(RemittanceAdviceHeader).where(
+                    RemittanceAdviceHeader.id.in_(header_ids)
+                )
+            ).all()
+        )
+        if header_ids
+        else []
+    )
+
     bank_payload = [
         {
             "id": str(row.id),
             "amount": row.amount,
             "bank_reference": row.bank_reference,
             "buyer_reference": row.buyer_reference,
+            "buyer_account_number": row.buyer_account_number,
             "payment_purpose": row.payment_purpose,
         }
         for row in bank_rows
     ]
-    rem_payload = [
+    header_payload = [
         {
-            "id": str(line.id),
-            "invoice_number": line.invoice_number,
-            "paid_amount": line.paid_amount,
+            "id": str(h.id),
+            "bank_reference": h.bank_reference,
+            "buyer_reference": h.buyer_reference,
+            "buyer_account_number": h.buyer_account_number,
+            "total_paid_amount": h.total_paid_amount,
         }
-        for line in rem_lines
+        for h in headers
     ]
+    lines_by_header: dict[str, list[dict]] = {
+        str(h.id): [
+            {
+                "id": str(line.id),
+                "invoice_number": line.invoice_number,
+                "paid_amount": line.paid_amount,
+                "buyer_reference": line.buyer_reference,
+            }
+            for line in rem_lines
+            if line.advice_header_id == h.id
+        ]
+        for h in headers
+    }
 
-    candidates = generate_match_candidates(bank_payload, rem_payload)
+    candidates = match_bank_to_remittance(bank_payload, header_payload, lines_by_header)
     persisted: list[ReconciliationMatch] = []
     for cand in candidates:
         match = ReconciliationMatch(
