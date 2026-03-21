@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, Field
 
@@ -52,7 +53,9 @@ class MatchDecisionRequest(BaseModel):
 
 
 class ManualLinkRequest(BaseModel):
-    bank_statement_id: str = Field(validation_alias=AliasChoices('bank_statement_id', 'bank_statement_line_id'))
+    bank_statement_id: str = Field(
+        validation_alias=AliasChoices("bank_statement_id", "bank_statement_line_id")
+    )
     remittance_advice_line_id: str | None = None
     reason_code: str | None = None
     comment: str | None = None
@@ -81,3 +84,36 @@ class JournalPreviewResponse(BaseModel):
     status: str
     journal_headers: int
     journal_lines: list[JournalLineView] = Field(default_factory=list)
+
+
+# ── Job scheduling schemas ────────────────────────────────────────────────────
+
+
+class JobRuleCreate(BaseModel):
+    tenant_id: UUID | None = None
+    frequency: str
+    day_of_week: int | None = None
+    day_of_month: int | None = None
+    run_time: str
+    is_active: bool = True
+
+
+class JobRuleResponse(BaseModel):
+    id: str
+    tenant_id: str | None = None
+    tenant_code: str | None = None
+    tenant_name: str | None = None
+    frequency: str
+    day_of_week: int | None = None
+    day_of_month: int | None = None
+    run_time: str
+    is_active: bool
+    created_at: datetime
+    last_triggered_at: datetime | None = None
+
+
+class TenantResponse(BaseModel):
+    id: str
+    code: str
+    name: str
+    is_active: bool

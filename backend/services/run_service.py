@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from azure.storage.blob import BlobServiceClient
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from backend.config import settings
@@ -29,18 +30,28 @@ def _ensure_tenant(db: Session, tenant_code: str) -> Tenant:
     tenant = db.scalar(select(Tenant).where(Tenant.code == tenant_code))
     if tenant:
         return tenant
-    tenant = Tenant(code=tenant_code, name=tenant_code.replace('-', ' ').title(), is_active=True)
+    tenant = Tenant(
+        code=tenant_code, name=tenant_code.replace("-", " ").title(), is_active=True
+    )
     db.add(tenant)
     db.flush()
     return tenant
 
 
-def _get_blob(client: BlobServiceClient, container_name: str, prefix: str, suffix: str) -> tuple[str, bytes]:
+def _get_blob(
+    client: BlobServiceClient, container_name: str, prefix: str, suffix: str
+) -> tuple[str, bytes]:
     container = client.get_container_client(container_name)
-    candidates = [b for b in container.list_blobs(name_starts_with=prefix) if b.name.lower().endswith(suffix)]
+    candidates = [
+        b
+        for b in container.list_blobs(name_starts_with=prefix)
+        if b.name.lower().endswith(suffix)
+    ]
     if not candidates:
-        raise ServiceError(f'No blob found under prefix={prefix} for suffix={suffix}')
-    chosen = sorted(candidates, key=lambda b: b.last_modified or datetime.min, reverse=True)[0]
+        raise ServiceError(f"No blob found under prefix={prefix} for suffix={suffix}")
+    chosen = sorted(
+        candidates, key=lambda b: b.last_modified or datetime.min, reverse=True
+    )[0]
     data = container.download_blob(chosen.name).readall()
     return chosen.name, data
 
@@ -54,7 +65,34 @@ def _upsert_blob_object(
     payload: bytes,
 ) -> BlobObject:
     content_hash = sha256_bytes(payload)
-    existing = db.scalar(
+    # Strip leading UUID prefix (e.g. "21332fca_Sample Bank Statement.xlsx" → "Sample Bank Statement.xlsx")
+    raw_file_name = blob_path.split("/")[-1]
+    parts = raw_file_name.split("_", 1)
+    original_file_name = (
+        parts[1]
+        if len(parts) == 2 and len(parts[0]) == 8 and parts[0].isalnum()
+        else raw_file_name
+    )
+    # Atomic INSERT ... ON CONFLICT DO NOTHING: blocks until any competing
+    # transaction commits, then skips the insert instead of raising IntegrityError.
+    stmt = (
+        pg_insert(BlobObject)
+        .values(
+            id=uuid4(),
+            tenant_id=tenant.id,
+            source_type=source_type,
+            business_date=business_date,
+            container_name=settings.azure_raw_container,
+            blob_path=blob_path,
+            original_file_name=original_file_name,
+            content_hash=content_hash,
+            size_bytes=len(payload),
+        )
+        .on_conflict_do_nothing(constraint="uq_blob_dedup")
+    )
+    db.execute(stmt)
+    db.flush()
+    return db.scalar(
         select(BlobObject).where(
             BlobObject.tenant_id == tenant.id,
             BlobObject.source_type == source_type,
@@ -62,25 +100,34 @@ def _upsert_blob_object(
             BlobObject.content_hash == content_hash,
         )
     )
-    if existing:
-        return existing
 
-    blob_obj = BlobObject(
-        tenant_id=tenant.id,
-        source_type=source_type,
-        business_date=business_date,
-        container_name=settings.azure_raw_container,
-        blob_path=blob_path,
-        content_hash=content_hash,
-        size_bytes=len(payload),
+
+def _create_run_if_needed(
+    db: Session,
+    tenant: Tenant,
+    business_date,
+    bank_blob: BlobObject,
+    rem_blob: BlobObject,
+) -> IngestionRun:
+    run_id = uuid4()
+    # Atomic INSERT ... ON CONFLICT DO NOTHING avoids UniqueViolation when the
+    # job-runner and the API endpoint race to create the same run slot.
+    stmt = (
+        pg_insert(IngestionRun)
+        .values(
+            id=run_id,
+            tenant_id=tenant.id,
+            business_date=business_date,
+            status=RunStatus.RECEIVED,
+            bank_blob_id=bank_blob.id,
+            remittance_blob_id=rem_blob.id,
+        )
+        .on_conflict_do_nothing(constraint="uq_ingestion_run_slot")
     )
-    db.add(blob_obj)
+    db.execute(stmt)
     db.flush()
-    return blob_obj
 
-
-def _create_run_if_needed(db: Session, tenant: Tenant, business_date, bank_blob: BlobObject, rem_blob: BlobObject) -> IngestionRun:
-    existing = db.scalar(
+    run = db.scalar(
         select(IngestionRun)
         .where(
             IngestionRun.tenant_id == tenant.id,
@@ -90,29 +137,23 @@ def _create_run_if_needed(db: Session, tenant: Tenant, business_date, bank_blob:
         )
         .order_by(IngestionRun.started_at.desc())
     )
-    if existing:
-        if existing.status == RunStatus.FAILED:
-            existing.status = RunStatus.RECEIVED
-            existing.error_message = None
-            existing.review_reason_code = None
-            existing.finished_at = None
-            db.flush()
-        return existing
-
-    run = IngestionRun(
-        tenant_id=tenant.id,
-        business_date=business_date,
-        status=RunStatus.RECEIVED,
-        bank_blob_id=bank_blob.id,
-        remittance_blob_id=rem_blob.id,
-    )
-    db.add(run)
-    db.flush()
+    if run is None:
+        raise ServiceError("Could not create or retrieve ingestion run")
+    if run.status == RunStatus.FAILED:
+        run.status = RunStatus.RECEIVED
+        run.error_message = None
+        run.review_reason_code = None
+        run.finished_at = None
+        db.flush()
     return run
 
 
-def _persist_bank_data(db: Session, blob_object: BlobObject, payload: bytes) -> list[BankStatement]:
-    existing = db.scalars(select(BankStatement).where(BankStatement.blob_object_id == blob_object.id)).all()
+def _persist_bank_data(
+    db: Session, blob_object: BlobObject, payload: bytes
+) -> list[BankStatement]:
+    existing = db.scalars(
+        select(BankStatement).where(BankStatement.blob_object_id == blob_object.id)
+    ).all()
     if existing:
         return list(existing)
 
@@ -126,9 +167,13 @@ def _persist_bank_data(db: Session, blob_object: BlobObject, payload: bytes) -> 
     return statements
 
 
-def _persist_remittance_data(db: Session, blob_object: BlobObject, payload: bytes) -> tuple[list[RemittanceAdviceLine], list[str]]:
+def _persist_remittance_data(
+    db: Session, blob_object: BlobObject, payload: bytes
+) -> tuple[list[RemittanceAdviceLine], list[str]]:
     existing_header = db.scalar(
-        select(RemittanceAdviceHeader).where(RemittanceAdviceHeader.blob_object_id == blob_object.id)
+        select(RemittanceAdviceHeader).where(
+            RemittanceAdviceHeader.blob_object_id == blob_object.id
+        )
     )
     if existing_header:
         return list(existing_header.lines), []
@@ -150,13 +195,13 @@ def _persist_remittance_data(db: Session, blob_object: BlobObject, payload: byte
     for row in normalized.lines:
         line_payload = row.model_dump(
             include={
-                'line_number',
-                'invoice_number',
-                'invoice_date',
-                'paid_amount',
-                'currency',
-                'customer_reference',
-                'raw_line_text',
+                "line_number",
+                "invoice_number",
+                "invoice_date",
+                "paid_amount",
+                "currency",
+                "customer_reference",
+                "raw_line_text",
             }
         )
         line = RemittanceAdviceLine(advice_header_id=header.id, **line_payload)
@@ -172,25 +217,27 @@ def _persist_matches(
     bank_rows: list[BankStatement],
     rem_lines: list[RemittanceAdviceLine],
 ) -> list[ReconciliationMatch]:
-    existing = db.scalars(select(ReconciliationMatch).where(ReconciliationMatch.run_id == run.id)).all()
+    existing = db.scalars(
+        select(ReconciliationMatch).where(ReconciliationMatch.run_id == run.id)
+    ).all()
     if existing:
         return existing
 
     bank_payload = [
         {
-            'id': str(row.id),
-            'amount': row.amount,
-            'bank_reference': row.bank_reference,
-            'customer_reference': row.customer_reference,
-            'payment_purpose': row.payment_purpose,
+            "id": str(row.id),
+            "amount": row.amount,
+            "bank_reference": row.bank_reference,
+            "customer_reference": row.customer_reference,
+            "payment_purpose": row.payment_purpose,
         }
         for row in bank_rows
     ]
     rem_payload = [
         {
-            'id': str(line.id),
-            'invoice_number': line.invoice_number,
-            'paid_amount': line.paid_amount,
+            "id": str(line.id),
+            "invoice_number": line.invoice_number,
+            "paid_amount": line.paid_amount,
         }
         for line in rem_lines
     ]
@@ -200,15 +247,19 @@ def _persist_matches(
     for cand in candidates:
         match = ReconciliationMatch(
             run_id=run.id,
-            bank_statement_id=UUID(cand['bank_statement_line_id']),
-            remittance_advice_line_id=(UUID(cand['remittance_advice_line_id']) if cand['remittance_advice_line_id'] else None),
-            status=cand['status'],
-            match_rule=cand['match_rule'],
-            confidence_score=cand['confidence_score'],
-            amount_applied=cand['amount_applied'],
-            variance_amount=cand['variance_amount'],
-            source=cand['source'],
-            is_selected=cand.get('is_selected', False),
+            bank_statement_id=UUID(cand["bank_statement_line_id"]),
+            remittance_advice_line_id=(
+                UUID(cand["remittance_advice_line_id"])
+                if cand["remittance_advice_line_id"]
+                else None
+            ),
+            status=cand["status"],
+            match_rule=cand["match_rule"],
+            confidence_score=cand["confidence_score"],
+            amount_applied=cand["amount_applied"],
+            variance_amount=cand["variance_amount"],
+            source=cand["source"],
+            is_selected=cand.get("is_selected", False),
         )
         db.add(match)
         persisted.append(match)
@@ -217,24 +268,45 @@ def _persist_matches(
 
 
 def ingest_run(db: Session, tenant_code: str, business_date) -> IngestionRun:
-    client = BlobServiceClient.from_connection_string(settings.azurite_connection_string)
+    client = BlobServiceClient.from_connection_string(
+        settings.azurite_connection_string
+    )
     tenant = _ensure_tenant(db, tenant_code)
 
-    bank_prefix = build_blob_prefix(tenant_code, 'bank-statement', business_date)
-    rem_prefix = build_blob_prefix(tenant_code, 'remittance', business_date)
+    bank_prefix = build_blob_prefix(tenant_code, "bank-statement", business_date)
+    rem_prefix = build_blob_prefix(tenant_code, "remittance", business_date)
 
-    bank_blob_path, bank_payload = _get_blob(client, settings.azure_raw_container, bank_prefix, '.xlsx')
-    rem_blob_path, rem_payload = _get_blob(client, settings.azure_raw_container, rem_prefix, '.pdf')
+    bank_blob_path, bank_payload = _get_blob(
+        client, settings.azure_raw_container, bank_prefix, ".xlsx"
+    )
+    rem_blob_path, rem_payload = _get_blob(
+        client, settings.azure_raw_container, rem_prefix, ".pdf"
+    )
 
-    bank_blob = _upsert_blob_object(db, tenant, SourceType.BANK_STATEMENT, business_date, bank_blob_path, bank_payload)
-    rem_blob = _upsert_blob_object(db, tenant, SourceType.REMITTANCE, business_date, rem_blob_path, rem_payload)
+    bank_blob = _upsert_blob_object(
+        db,
+        tenant,
+        SourceType.BANK_STATEMENT,
+        business_date,
+        bank_blob_path,
+        bank_payload,
+    )
+    rem_blob = _upsert_blob_object(
+        db, tenant, SourceType.REMITTANCE, business_date, rem_blob_path, rem_payload
+    )
 
     run = _create_run_if_needed(db, tenant, business_date, bank_blob, rem_blob)
-    if run.status in {RunStatus.POSTED, RunStatus.READY_TO_POST, RunStatus.REVIEW_REQUIRED}:
+    if run.status in {
+        RunStatus.POSTED,
+        RunStatus.READY_TO_POST,
+        RunStatus.REVIEW_REQUIRED,
+    }:
         return run
 
     bank_rows = _persist_bank_data(db, bank_blob, bank_payload)
     rem_lines, extraction_reasons = _persist_remittance_data(db, rem_blob, rem_payload)
+    bank_blob.is_parsed = True
+    rem_blob.is_parsed = True
     run.status = RunStatus.PARSED
     run.parsed_line_count = len(bank_rows) + len(rem_lines)
 
@@ -245,12 +317,18 @@ def ingest_run(db: Session, tenant_code: str, business_date) -> IngestionRun:
     requires_review = (
         bool(extraction_reasons)
         or any(
-            m.status in {MatchStatus.PARTIAL_MATCH, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW}
+            m.status
+            in {
+                MatchStatus.PARTIAL_MATCH,
+                MatchStatus.UNMATCHED,
+                MatchStatus.MANUAL_REVIEW,
+            }
             for m in matches
             if m.is_selected
         )
         or any(
-            (m.confidence_score or Decimal('0.0')) < Decimal(str(settings.auto_post_confidence_threshold))
+            (m.confidence_score or Decimal("0.0"))
+            < Decimal(str(settings.auto_post_confidence_threshold))
             for m in matches
             if m.is_selected
         )
@@ -260,13 +338,21 @@ def ingest_run(db: Session, tenant_code: str, business_date) -> IngestionRun:
         [
             m
             for m in matches
-            if m.is_selected and m.status in {MatchStatus.PARTIAL_MATCH, MatchStatus.UNMATCHED, MatchStatus.MANUAL_REVIEW}
+            if m.is_selected
+            and m.status
+            in {
+                MatchStatus.PARTIAL_MATCH,
+                MatchStatus.UNMATCHED,
+                MatchStatus.MANUAL_REVIEW,
+            }
         ]
     )
 
     if requires_review:
         run.status = RunStatus.REVIEW_REQUIRED
-        run.review_reason_code = extraction_reasons[0] if extraction_reasons else 'LOW_CONFIDENCE_OR_PARTIAL'
+        run.review_reason_code = (
+            extraction_reasons[0] if extraction_reasons else "LOW_CONFIDENCE_OR_PARTIAL"
+        )
     else:
         run.status = RunStatus.READY_TO_POST
 
@@ -275,17 +361,23 @@ def ingest_run(db: Session, tenant_code: str, business_date) -> IngestionRun:
 
 
 def _actor(actor_id: str | None) -> str:
-    return actor_id or 'analyst.demo'
+    return actor_id or "analyst.demo"
 
 
 def _get_match(db: Session, match_id: UUID) -> ReconciliationMatch:
     match = db.get(ReconciliationMatch, match_id)
     if not match:
-        raise ServiceError(f'Match {match_id} not found')
+        raise ServiceError(f"Match {match_id} not found")
     return match
 
 
-def approve_match(db: Session, match_id: UUID, actor_id: str | None, reason_code: str | None, comment: str | None) -> MatchActionResponse:
+def approve_match(
+    db: Session,
+    match_id: UUID,
+    actor_id: str | None,
+    reason_code: str | None,
+    comment: str | None,
+) -> MatchActionResponse:
     match = _get_match(db, match_id)
     match.status = MatchStatus.APPROVED
     match.reviewed_by = _actor(actor_id)
@@ -301,7 +393,13 @@ def approve_match(db: Session, match_id: UUID, actor_id: str | None, reason_code
     )
 
 
-def reject_match(db: Session, match_id: UUID, actor_id: str | None, reason_code: str | None, comment: str | None) -> MatchActionResponse:
+def reject_match(
+    db: Session,
+    match_id: UUID,
+    actor_id: str | None,
+    reason_code: str | None,
+    comment: str | None,
+) -> MatchActionResponse:
     match = _get_match(db, match_id)
     match.status = MatchStatus.REJECTED
     match.reviewed_by = _actor(actor_id)
@@ -327,8 +425,7 @@ def manual_link(
     comment: str | None,
 ) -> MatchActionResponse:
     for old in db.scalars(
-        select(ReconciliationMatch)
-        .where(
+        select(ReconciliationMatch).where(
             ReconciliationMatch.run_id == run_id,
             ReconciliationMatch.bank_statement_id == bank_statement_id,
             ReconciliationMatch.is_selected.is_(True),
@@ -341,11 +438,11 @@ def manual_link(
         bank_statement_id=bank_statement_id,
         remittance_advice_line_id=remittance_advice_line_id,
         status=MatchStatus.APPROVED,
-        match_rule='manual_link',
-        confidence_score=Decimal('1.0000'),
+        match_rule="manual_link",
+        confidence_score=Decimal("1.0000"),
         amount_applied=None,
-        variance_amount=Decimal('0.00'),
-        source='MANUAL',
+        variance_amount=Decimal("0.00"),
+        source="MANUAL",
         is_selected=True,
         reviewed_by=_actor(actor_id),
         reviewed_at=datetime.utcnow(),
@@ -362,36 +459,48 @@ def manual_link(
     )
 
 
-def post_journals(db: Session, run_id: UUID, actor_id: str | None) -> list[JournalEntry]:
+def post_journals(
+    db: Session, run_id: UUID, actor_id: str | None
+) -> list[JournalEntry]:
     run = db.get(IngestionRun, run_id)
     if not run:
-        raise ServiceError(f'Run {run_id} not found')
+        raise ServiceError(f"Run {run_id} not found")
 
     if run.status not in {RunStatus.READY_TO_POST, RunStatus.REVIEW_REQUIRED}:
-        raise ServiceError(f'Run {run.id} is not ready for posting: {run.status.value}')
+        raise ServiceError(f"Run {run.id} is not ready for posting: {run.status.value}")
 
     selected = db.scalars(
-        select(ReconciliationMatch).where(ReconciliationMatch.run_id == run.id, ReconciliationMatch.is_selected.is_(True))
+        select(ReconciliationMatch).where(
+            ReconciliationMatch.run_id == run.id,
+            ReconciliationMatch.is_selected.is_(True),
+        )
     ).all()
 
     postable = [
         m
         for m in selected
-        if m.status in {MatchStatus.AUTO_MATCHED, MatchStatus.APPROVED, MatchStatus.PARTIAL_MATCH}
+        if m.status
+        in {MatchStatus.AUTO_MATCHED, MatchStatus.APPROVED, MatchStatus.PARTIAL_MATCH}
         and m.remittance_advice_line_id is not None
     ]
-    blocking = [m for m in selected if m.status in {MatchStatus.REJECTED, MatchStatus.MANUAL_REVIEW}]
+    blocking = [
+        m
+        for m in selected
+        if m.status in {MatchStatus.REJECTED, MatchStatus.MANUAL_REVIEW}
+    ]
     if blocking:
-        raise ServiceError('Run has unresolved matches; cannot post journals')
+        raise ServiceError("Run has unresolved matches; cannot post journals")
     if not postable:
-        raise ServiceError('Run has no postable remittance matches')
+        raise ServiceError("Run has no postable remittance matches")
 
     posting_date = run.business_date
     primary_bank = db.get(BankStatement, postable[0].bank_statement_id)
     if primary_bank and primary_bank.booking_date:
         posting_date = primary_bank.booking_date
 
-    existing_lines = db.scalars(select(JournalEntry).where(JournalEntry.run_id == run.id)).all()
+    existing_lines = db.scalars(
+        select(JournalEntry).where(JournalEntry.run_id == run.id)
+    ).all()
     if existing_lines:
         run.status = RunStatus.POSTED
         run.finished_at = datetime.utcnow()
@@ -403,7 +512,11 @@ def post_journals(db: Session, run_id: UUID, actor_id: str | None) -> list[Journ
     used_bank_ids: set[UUID] = set()
     for match in postable:
         bank_row = db.get(BankStatement, match.bank_statement_id)
-        rem_line = db.get(RemittanceAdviceLine, match.remittance_advice_line_id) if match.remittance_advice_line_id else None
+        rem_line = (
+            db.get(RemittanceAdviceLine, match.remittance_advice_line_id)
+            if match.remittance_advice_line_id
+            else None
+        )
         if not bank_row or not rem_line or rem_line.paid_amount is None:
             continue
         used_bank_ids.add(bank_row.id)
@@ -412,26 +525,26 @@ def post_journals(db: Session, run_id: UUID, actor_id: str | None) -> list[Journ
         entry = JournalEntry(
             run_id=run.id,
             line_number=line_no,
-            company_code='1000',
+            company_code="1000",
             posting_date=posting_date,
             document_date=posting_date,
-            document_type='SA',
-            gl_account='100000',
+            document_type="SA",
+            gl_account="100000",
             debit=None,
             credit=amount,
             currency=rem_line.currency or bank_row.currency,
             item_text=(
-                f'{rem_line.invoice_number}/{rem_line.customer_reference}'
+                f"{rem_line.invoice_number}/{rem_line.customer_reference}"
                 if rem_line.invoice_number and rem_line.customer_reference
                 else (
                     rem_line.invoice_number
                     or rem_line.customer_reference
                     or bank_row.customer_reference
                     or bank_row.bank_reference
-                    or 'auto-posted'
+                    or "auto-posted"
                 )
             ),
-            source_file_name=f'run-{run.id}.json',
+            source_file_name=f"run-{run.id}.json",
             reconciliation_match_id=match.id,
             bank_statement_id=bank_row.id,
             remittance_advice_line_id=rem_line.id,
@@ -452,16 +565,18 @@ def post_journals(db: Session, run_id: UUID, actor_id: str | None) -> list[Journ
         entry = JournalEntry(
             run_id=run.id,
             line_number=line_no,
-            company_code='1000',
+            company_code="1000",
             posting_date=bank_row.booking_date or posting_date,
             document_date=bank_row.booking_date or posting_date,
-            document_type='SA',
-            gl_account='100000',
+            document_type="SA",
+            gl_account="100000",
             debit=amount if bank_row.amount > 0 else None,
             credit=amount if bank_row.amount < 0 else None,
             currency=bank_row.currency,
-            item_text=bank_row.customer_reference or bank_row.bank_reference or 'unmatched-bank-line',
-            source_file_name=f'run-{run.id}.json',
+            item_text=bank_row.customer_reference
+            or bank_row.bank_reference
+            or "unmatched-bank-line",
+            source_file_name=f"run-{run.id}.json",
             bank_statement_id=bank_row.id,
         )
         db.add(entry)

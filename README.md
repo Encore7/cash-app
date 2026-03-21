@@ -62,7 +62,7 @@ docker compose down -v
 
 2. Start core services:
 ```bash
-docker compose up -d --build postgres azurite backend frontend
+docker compose up -d --build
 ```
 
 3. Apply migrations:
@@ -77,9 +77,9 @@ uv run python scripts/bootstrap_raw_data.py --tenant bike-team-gmbh --business-d
 
 5. Trigger ingestion (parse + match):
 ```bash
-curl -sS -X POST http://localhost:8000/runs/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant_code":"bike-team-gmbh","business_date":"2026-03-21"}'
+curl.exe -X POST "http://localhost:8000/runs/ingest" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"tenant_code\":\"bike-team-gmbh\",\"business_date\":\"2026-03-21\"}"
 ```
 
 6. Capture run id and inspect matching output:
