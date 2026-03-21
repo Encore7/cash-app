@@ -7,13 +7,24 @@ import {
     CardContent,
     Chip,
     CircularProgress,
+    Collapse,
     Grid,
+    IconButton,
     Paper,
+    Stack,
     Tab,
+    Table,
+    TableBody,
+    TableCell,
+    TableContainer,
+    TableHead,
+    TableRow,
     Tabs,
     Typography,
 } from '@mui/material'
-import { DataGrid, GridColDef, GridRenderCellParams } from '@mui/x-data-grid'
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
+import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp'
+import { DataGrid, GridColDef, GridFilterModel, GridRenderCellParams } from '@mui/x-data-grid'
 import { PieChart } from '@mui/x-charts/PieChart'
 
 const API = 'http://localhost:8000'
@@ -40,6 +51,9 @@ interface Summary {
 interface Match {
     id: string
     run_id: string
+    tenant_id: string | null
+    tenant_code: string | null
+    tenant_name: string | null
     status: string
     confidence_score: number
     match_rule: string
@@ -111,15 +125,25 @@ function fmt(n: number | null | undefined, currency?: string | null) {
     return currency ? `${currency} ${s}` : s
 }
 
+function statusGroup(status: string): string {
+    if (['AUTO_MATCHED', 'APPROVED', 'CLOSED'].includes(status)) return 'matched'
+    if (status === 'UNMATCHED') return 'unmatched'
+    return 'manual_review'
+}
+
 export default function AnalyticsPage() {
     const [summary, setSummary] = useState<Summary | null>(null)
     const [matches, setMatches] = useState<Match[]>([])
     const [bankStmts, setBankStmts] = useState<BankStatement[]>([])
     const [remHeaders, setRemHeaders] = useState<RemittanceHeader[]>([])
-    const [matchFilter, setMatchFilter] = useState<string | null>(null)
+
     const [activeTab, setActiveTab] = useState(0)
     const [docTab, setDocTab] = useState(0)
-    const [selectedHeaderId, setSelectedHeaderId] = useState<string | null>(null)
+    const [matchFilterGroup, setMatchFilterGroup] = useState<string | null>(null)
+    const [selectedTenantName, setSelectedTenantName] = useState<string | null>(null)
+    const [matchFilterModel, setMatchFilterModel] = useState<GridFilterModel>({ items: [] })
+    const [expandedHeaderId, setExpandedHeaderId] = useState<string | null>(null)
+
     const [loading, setLoading] = useState(true)
     const [actionLoading, setActionLoading] = useState<string | null>(null)
 
@@ -134,9 +158,6 @@ export default function AnalyticsPage() {
             setMatches(m.data)
             setBankStmts(b.data)
             setRemHeaders(r.data)
-            if (!selectedHeaderId && r.data.length > 0) {
-                setSelectedHeaderId(r.data[0].id)
-            }
         })
     }
 
@@ -172,16 +193,63 @@ export default function AnalyticsPage() {
         ]
         : []
 
-    const filteredMatches = matchFilter
-        ? matches.filter((m) => {
-            if (matchFilter === 'matched') return ['AUTO_MATCHED', 'APPROVED', 'CLOSED'].includes(m.status)
-            if (matchFilter === 'unmatched') return m.status === 'UNMATCHED'
-            if (matchFilter === 'manual_review') return ['MANUAL_REVIEW', 'PARTIAL_MATCH', 'REJECTED'].includes(m.status)
-            return true
-        })
-        : matches
+    function applyMatchGridFilter(group: string | null, tenantName: string | null) {
+        const items: GridFilterModel['items'] = []
+
+        if (group) {
+            items.push({
+                id: 1,
+                field: 'status_group',
+                operator: 'equals',
+                value: group,
+            })
+        }
+        if (tenantName) {
+            items.push({
+                id: 2,
+                field: 'tenant_name',
+                operator: 'contains',
+                value: tenantName,
+            })
+        }
+
+        setMatchFilterModel({ items })
+    }
+
+    function onPieSliceClick(sliceIndex: number) {
+        const keys = ['matched', 'unmatched', 'manual_review']
+        const clicked = keys[sliceIndex] ?? null
+        const next = matchFilterGroup === clicked ? null : clicked
+        setMatchFilterGroup(next)
+        setActiveTab(2)
+        applyMatchGridFilter(next, selectedTenantName)
+    }
+
+    function onTenantClick(tenant: TenantSummary) {
+        const next = selectedTenantName === tenant.name ? null : tenant.name
+        setSelectedTenantName(next)
+        setActiveTab(2)
+        applyMatchGridFilter(matchFilterGroup, next)
+    }
+
+    function clearMatchFilters() {
+        setMatchFilterGroup(null)
+        setSelectedTenantName(null)
+        setMatchFilterModel({ items: [] })
+    }
+
+    const matchRows = useMemo(
+        () => matches.map((m) => ({ ...m, id: m.id, status_group: statusGroup(m.status) })),
+        [matches],
+    )
 
     const matchColumns = useMemo<GridColDef[]>(() => [
+        {
+            field: 'tenant_name',
+            headerName: 'Tenant',
+            width: 170,
+            valueGetter: (_v, r) => r.tenant_name ?? '–',
+        },
         {
             field: 'status',
             headerName: 'Status',
@@ -189,6 +257,12 @@ export default function AnalyticsPage() {
             renderCell: (params: GridRenderCellParams) => (
                 <Chip size='small' label={String(params.value)} color={STATUS_COLORS[String(params.value)] ?? 'default'} />
             ),
+        },
+        {
+            field: 'status_group',
+            headerName: 'Status Group',
+            width: 130,
+            hideable: true,
         },
         { field: 'match_rule', headerName: 'Rule', minWidth: 180, flex: 1 },
         {
@@ -257,36 +331,15 @@ export default function AnalyticsPage() {
         { field: 'payment_purpose', headerName: 'Purpose', minWidth: 220, flex: 1, valueGetter: (_v, r) => r.payment_purpose ?? '–' },
     ], [])
 
-    const remHeaderColumns = useMemo<GridColDef[]>(() => [
-        { field: 'advice_number', headerName: 'Advice #', width: 150, valueGetter: (_v, r) => r.advice_number ?? '–' },
-        { field: 'advice_date', headerName: 'Date', width: 130, valueGetter: (_v, r) => r.advice_date ?? '–' },
-        { field: 'payer_name', headerName: 'Payer', minWidth: 180, flex: 1, valueGetter: (_v, r) => r.payer_name ?? '–' },
-        {
-            field: 'total_paid_amount',
-            headerName: 'Total Paid',
-            width: 140,
-            valueGetter: (_v, r) => fmt(r.total_paid_amount, r.document_currency),
-        },
-        {
-            field: 'line_count',
-            headerName: 'Lines',
-            width: 90,
-            valueGetter: (_v, r) => Array.isArray(r.lines) ? r.lines.length : 0,
-        },
-    ], [])
-
     const remLineColumns = useMemo<GridColDef[]>(() => [
-        { field: 'line_number', headerName: '#', width: 80 },
+        { field: 'line_number', headerName: '#', width: 70 },
         { field: 'invoice_number', headerName: 'Invoice', width: 130, valueGetter: (_v, r) => r.invoice_number ?? '–' },
-        { field: 'invoice_date', headerName: 'Invoice Date', width: 130, valueGetter: (_v, r) => r.invoice_date ?? '–' },
+        { field: 'invoice_date', headerName: 'Invoice Date', width: 120, valueGetter: (_v, r) => r.invoice_date ?? '–' },
         { field: 'paid_amount', headerName: 'Paid Amount', width: 130, valueGetter: (_v, r) => fmt(r.paid_amount) },
-        { field: 'currency', headerName: 'Ccy', width: 90, valueGetter: (_v, r) => r.currency ?? '–' },
+        { field: 'currency', headerName: 'Ccy', width: 80, valueGetter: (_v, r) => r.currency ?? '–' },
         { field: 'customer_reference', headerName: 'Customer Ref', width: 150, valueGetter: (_v, r) => r.customer_reference ?? '–' },
-        { field: 'raw_line_text', headerName: 'Raw Text', minWidth: 260, flex: 1 },
+        { field: 'raw_line_text', headerName: 'Raw Text', minWidth: 250, flex: 1 },
     ], [])
-
-    const selectedHeader = remHeaders.find((h) => h.id === selectedHeaderId) ?? null
-    const remLineRows = selectedHeader?.lines ?? []
 
     if (loading) {
         return (
@@ -304,13 +357,13 @@ export default function AnalyticsPage() {
 
             <Paper sx={{ mb: 2 }}>
                 <Tabs value={activeTab} onChange={(_e, v) => setActiveTab(v)}>
+                    <Tab label='Source Documents' />
                     <Tab label='Reconciliation Analytics' />
                     <Tab label='Reconciliation Matches' />
-                    <Tab label='Documents' />
                 </Tabs>
             </Paper>
 
-            {activeTab === 0 && (
+            {activeTab === 1 && (
                 <Grid container spacing={3} sx={{ mb: 3 }}>
                     <Grid size={{ xs: 12, md: 6 }}>
                         <Card>
@@ -327,21 +380,12 @@ export default function AnalyticsPage() {
                                                 innerRadius: 40,
                                             },
                                         ]}
-                                        onItemClick={(_e, item) => {
-                                            const keys = ['matched', 'unmatched', 'manual_review']
-                                            const clicked = keys[item.dataIndex]
-                                            setMatchFilter((prev) => (prev === clicked ? null : clicked))
-                                        }}
+                                        onItemClick={(_e, item) => onPieSliceClick(item.dataIndex)}
                                         height={280}
                                         slotProps={{ legend: { direction: 'horizontal', position: { vertical: 'bottom', horizontal: 'center' } } }}
                                     />
                                 ) : (
                                     <Typography color='text.secondary'>No match data yet.</Typography>
-                                )}
-                                {matchFilter && (
-                                    <Typography variant='caption' color='primary'>
-                                        Showing <strong>{matchFilter.replace('_', ' ')}</strong> matches below
-                                    </Typography>
                                 )}
                             </CardContent>
                         </Card>
@@ -352,25 +396,33 @@ export default function AnalyticsPage() {
                             Tenant Breakdown
                         </Typography>
                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                            {summary?.tenants.map((t) => (
-                                <Card key={t.id} variant='outlined'>
-                                    <CardContent sx={{ py: 1, '&:last-child': { pb: 1 } }}>
-                                        <Box display='flex' justifyContent='space-between' alignItems='center'>
-                                            <Box>
-                                                <Typography variant='subtitle1'>{t.name}</Typography>
-                                                <Typography variant='caption' color='text.secondary'>
-                                                    {t.code} · {t.is_active ? 'Active' : 'Inactive'}
-                                                </Typography>
+                            {summary?.tenants.map((t) => {
+                                const selected = selectedTenantName === t.name
+                                return (
+                                    <Card
+                                        key={t.id}
+                                        variant={selected ? 'elevation' : 'outlined'}
+                                        onClick={() => onTenantClick(t)}
+                                        sx={{ cursor: 'pointer' }}
+                                    >
+                                        <CardContent sx={{ py: 1, '&:last-child': { pb: 1 } }}>
+                                            <Box display='flex' justifyContent='space-between' alignItems='center'>
+                                                <Box>
+                                                    <Typography variant='subtitle1'>{t.name}</Typography>
+                                                    <Typography variant='caption' color='text.secondary'>
+                                                        {t.code} · {t.is_active ? 'Active' : 'Inactive'}
+                                                    </Typography>
+                                                </Box>
+                                                <Box display='flex' gap={1}>
+                                                    <Chip size='small' label={`✓ ${t.matched}`} color='success' variant='outlined' />
+                                                    <Chip size='small' label={`✗ ${t.unmatched}`} color='error' variant='outlined' />
+                                                    <Chip size='small' label={`~ ${t.manual_review}`} color='warning' variant='outlined' />
+                                                </Box>
                                             </Box>
-                                            <Box display='flex' gap={1}>
-                                                <Chip size='small' label={`✓ ${t.matched}`} color='success' variant='outlined' />
-                                                <Chip size='small' label={`✗ ${t.unmatched}`} color='error' variant='outlined' />
-                                                <Chip size='small' label={`~ ${t.manual_review}`} color='warning' variant='outlined' />
-                                            </Box>
-                                        </Box>
-                                    </CardContent>
-                                </Card>
-                            ))}
+                                        </CardContent>
+                                    </Card>
+                                )
+                            })}
                             {!summary?.tenants.length && (
                                 <Typography color='text.secondary'>No tenants found.</Typography>
                             )}
@@ -379,23 +431,34 @@ export default function AnalyticsPage() {
                 </Grid>
             )}
 
-            {activeTab === 1 && (
+            {activeTab === 2 && (
                 <>
-                    <Typography variant='h6' gutterBottom>
-                        Reconciliation Matches {matchFilter ? `(${matchFilter.replace('_', ' ')})` : '(all)'}
-                    </Typography>
+                    <Stack direction='row' justifyContent='space-between' alignItems='center' mb={1}>
+                        <Typography variant='h6'>Reconciliation Matches</Typography>
+                        <Button onClick={clearMatchFilters}>Clear Filters</Button>
+                    </Stack>
+
                     <DataGrid
-                        rows={filteredMatches}
+                        rows={matchRows}
                         columns={matchColumns}
                         autoHeight
                         disableRowSelectionOnClick
                         pageSizeOptions={[10, 25, 50]}
-                        initialState={{ pagination: { paginationModel: { pageSize: 10 } } }}
+                        initialState={{
+                            pagination: { paginationModel: { pageSize: 10 } },
+                            columns: {
+                                columnVisibilityModel: {
+                                    status_group: false,
+                                },
+                            },
+                        }}
+                        filterModel={matchFilterModel}
+                        onFilterModelChange={setMatchFilterModel}
                     />
                 </>
             )}
 
-            {activeTab === 2 && (
+            {activeTab === 0 && (
                 <Paper sx={{ p: 1 }}>
                     <Tabs value={docTab} onChange={(_e, v) => setDocTab(v)} sx={{ mb: 1 }}>
                         <Tab label='Bank Statement' />
@@ -414,33 +477,75 @@ export default function AnalyticsPage() {
                     )}
 
                     {docTab === 1 && (
-                        <>
-                            <Typography variant='subtitle1' sx={{ px: 1, py: 0.5 }}>
-                                Headers
-                            </Typography>
-                            <DataGrid
-                                rows={remHeaders}
-                                columns={remHeaderColumns}
-                                autoHeight
-                                disableRowSelectionOnClick
-                                onRowClick={(params) => setSelectedHeaderId(String(params.id))}
-                                pageSizeOptions={[5, 10]}
-                                initialState={{ pagination: { paginationModel: { pageSize: 5 } } }}
-                                sx={{ mb: 2 }}
-                            />
-
-                            <Typography variant='subtitle1' sx={{ px: 1, py: 0.5 }}>
-                                Lines {selectedHeader ? `for Advice ${selectedHeader.advice_number ?? '–'}` : ''}
-                            </Typography>
-                            <DataGrid
-                                rows={remLineRows}
-                                columns={remLineColumns}
-                                autoHeight
-                                disableRowSelectionOnClick
-                                pageSizeOptions={[10, 25]}
-                                initialState={{ pagination: { paginationModel: { pageSize: 10 } } }}
-                            />
-                        </>
+                        <TableContainer>
+                            <Table size='small'>
+                                <TableHead>
+                                    <TableRow sx={{ bgcolor: 'action.hover' }}>
+                                        <TableCell sx={{ width: 48, p: 0.5 }} />
+                                        <TableCell>Advice #</TableCell>
+                                        <TableCell>Date</TableCell>
+                                        <TableCell>Payer</TableCell>
+                                        <TableCell>Total Paid</TableCell>
+                                        <TableCell sx={{ width: 70 }}>Lines</TableCell>
+                                    </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                    {remHeaders.map((hdr) => {
+                                        const isOpen = expandedHeaderId === hdr.id
+                                        const lineRows = (hdr.lines ?? []).map((ln) => ({ ...ln, id: ln.id }))
+                                        return (
+                                            <React.Fragment key={hdr.id}>
+                                                <TableRow hover>
+                                                    <TableCell sx={{ p: 0.5 }}>
+                                                        <IconButton
+                                                            size='small'
+                                                            onClick={() => setExpandedHeaderId((prev) => prev === hdr.id ? null : hdr.id)}
+                                                        >
+                                                            {isOpen
+                                                                ? <KeyboardArrowUpIcon fontSize='small' />
+                                                                : <KeyboardArrowDownIcon fontSize='small' />}
+                                                        </IconButton>
+                                                    </TableCell>
+                                                    <TableCell>{hdr.advice_number ?? '–'}</TableCell>
+                                                    <TableCell>{hdr.advice_date ?? '–'}</TableCell>
+                                                    <TableCell>{hdr.payer_name ?? '–'}</TableCell>
+                                                    <TableCell>{fmt(hdr.total_paid_amount, hdr.document_currency)}</TableCell>
+                                                    <TableCell>{Array.isArray(hdr.lines) ? hdr.lines.length : 0}</TableCell>
+                                                </TableRow>
+                                                <TableRow>
+                                                    <TableCell colSpan={6} sx={{ p: 0, border: 0 }}>
+                                                        <Collapse in={isOpen} unmountOnExit>
+                                                            <Box sx={{ p: 1.5, bgcolor: 'action.hover' }}>
+                                                                <DataGrid
+                                                                    rows={lineRows}
+                                                                    columns={remLineColumns}
+                                                                    autoHeight
+                                                                    disableRowSelectionOnClick
+                                                                    hideFooter
+                                                                    density='compact'
+                                                                    sx={{
+                                                                        border: '1px solid',
+                                                                        borderColor: 'divider',
+                                                                        bgcolor: 'background.paper',
+                                                                    }}
+                                                                />
+                                                            </Box>
+                                                        </Collapse>
+                                                    </TableCell>
+                                                </TableRow>
+                                            </React.Fragment>
+                                        )
+                                    })}
+                                    {remHeaders.length === 0 && (
+                                        <TableRow>
+                                            <TableCell colSpan={6} align='center' sx={{ py: 3, color: 'text.secondary' }}>
+                                                No remittance advice documents found.
+                                            </TableCell>
+                                        </TableRow>
+                                    )}
+                                </TableBody>
+                            </Table>
+                        </TableContainer>
                     )}
                 </Paper>
             )}

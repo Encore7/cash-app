@@ -267,6 +267,147 @@ def _persist_matches(
     return persisted
 
 
+# ---------------------------------------------------------------------------
+# GL account constants (cash accounting / bank reconciliation)
+# ---------------------------------------------------------------------------
+_CASH_GL = "100000"  # Bank / cash main account (GL)
+_COMPANY_CODE = "1000"  # Default company code (SAP-style)
+_DOC_TYPE = "SA"  # Standard accounting document
+
+
+def _generate_journal_entries(
+    db: Session,
+    run: IngestionRun,
+    bank_rows: list[BankStatement],
+    matches: list[ReconciliationMatch],
+) -> list[JournalEntry]:
+    """Create one Cash GL (100000) journal line per bank transaction.
+
+    When a bank row is matched to a remittance advice, the payment is split
+    into one line per invoice (remittance line), mirroring how the payer
+    allocated the bulk wire across their open items.
+
+    When a bank row has no remittance match a single line is created using
+    the bank reference / customer reference as item text.
+
+    Direction
+    ---------
+    Inflow  (bank amount ≥ 0) → Debit  GL 100000
+    Outflow (bank amount < 0) → Credit GL 100000
+
+    Item text
+    ---------
+    Remittance-split : "invoice_number/customer_reference" from the remittance line
+    Plain bank row   : bank_reference or customer_reference from the bank statement
+    """
+    existing = db.scalars(
+        select(JournalEntry).where(JournalEntry.run_id == run.id)
+    ).first()
+    if existing:
+        return list(
+            db.scalars(select(JournalEntry).where(JournalEntry.run_id == run.id)).all()
+        )
+
+    # Group selected matches that carry a remittance line, keyed by bank_statement_id
+    rem_matches_by_bank: dict[UUID, list[ReconciliationMatch]] = {}
+    for m in matches:
+        if m.is_selected and m.remittance_advice_line_id:
+            rem_matches_by_bank.setdefault(m.bank_statement_id, []).append(m)
+
+    # Index remaining selected matches (no remittance line) for item-text lookup
+    plain_match_by_bank: dict[UUID, ReconciliationMatch] = {
+        m.bank_statement_id: m
+        for m in matches
+        if m.is_selected and not m.remittance_advice_line_id
+    }
+
+    line_no = 1
+
+    for bank in bank_rows:
+        is_inflow = bank.amount >= 0
+        posting_date = bank.booking_date
+        currency = bank.currency
+
+        rem_matches = rem_matches_by_bank.get(bank.id)
+
+        if rem_matches:
+            # ── One journal line per matched remittance invoice ────────────
+            for match in rem_matches:
+                rl = db.get(RemittanceAdviceLine, match.remittance_advice_line_id)
+                # Prefer the remittance line's own paid_amount, fall back to match amount
+                if rl and rl.paid_amount is not None:
+                    amount = float(rl.paid_amount)
+                elif match.amount_applied is not None:
+                    amount = abs(float(match.amount_applied))
+                else:
+                    amount = abs(float(bank.amount))
+
+                parts: list[str] = []
+                if rl:
+                    if rl.invoice_number:
+                        parts.append(rl.invoice_number)
+                    if rl.customer_reference:
+                        parts.append(rl.customer_reference)
+                item_text: str | None = "/".join(parts)[:255] or None
+
+                db.add(
+                    JournalEntry(
+                        line_number=line_no,
+                        run_id=run.id,
+                        company_code=_COMPANY_CODE,
+                        posting_date=posting_date,
+                        document_date=posting_date,
+                        document_type=_DOC_TYPE,
+                        gl_account=_CASH_GL,
+                        debit=amount if is_inflow else None,
+                        credit=amount if not is_inflow else None,
+                        currency=currency,
+                        item_text=item_text,
+                        reconciliation_match_id=match.id,
+                        bank_statement_id=bank.id,
+                        remittance_advice_line_id=match.remittance_advice_line_id,
+                    )
+                )
+                line_no += 1
+
+        else:
+            # ── One journal line for the bank row ──────────────────────────
+            abs_amount = abs(float(bank.amount))
+            parts = []
+            if bank.bank_reference:
+                parts.append(bank.bank_reference)
+            elif bank.customer_reference:
+                parts.append(bank.customer_reference)
+            item_text = "/".join(parts)[:255] or None
+
+            plain_match = plain_match_by_bank.get(bank.id)
+
+            db.add(
+                JournalEntry(
+                    line_number=line_no,
+                    run_id=run.id,
+                    company_code=_COMPANY_CODE,
+                    posting_date=posting_date,
+                    document_date=posting_date,
+                    document_type=_DOC_TYPE,
+                    gl_account=_CASH_GL,
+                    debit=abs_amount if is_inflow else None,
+                    credit=abs_amount if not is_inflow else None,
+                    currency=currency,
+                    item_text=item_text,
+                    reconciliation_match_id=plain_match.id if plain_match else None,
+                    bank_statement_id=bank.id,
+                    remittance_advice_line_id=None,
+                )
+            )
+            line_no += 1
+
+    db.flush()
+    return list(
+        db.scalars(select(JournalEntry).where(JournalEntry.run_id == run.id)).all()
+    )
+
+
 def ingest_run_processing_only(
     db: Session, tenant_code: str, business_date
 ) -> IngestionRun:
@@ -390,6 +531,8 @@ def run_matching_for_parsed_runs(
             run.review_reason_code = "LOW_CONFIDENCE_OR_PARTIAL"
         else:
             run.status = RunStatus.READY_TO_POST
+
+        _generate_journal_entries(db, run, bank_rows, matches)
         db.flush()
 
     return all_matches
@@ -484,6 +627,7 @@ def ingest_run(db: Session, tenant_code: str, business_date) -> IngestionRun:
     else:
         run.status = RunStatus.READY_TO_POST
 
+    _generate_journal_entries(db, run, bank_rows, matches)
     db.flush()
     return run
 

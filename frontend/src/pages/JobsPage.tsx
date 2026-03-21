@@ -3,10 +3,9 @@ import {
     Alert,
     Box,
     Button,
-    Card,
-    CardContent,
     Checkbox,
     Chip,
+    CircularProgress,
     Dialog,
     DialogActions,
     DialogContent,
@@ -31,7 +30,6 @@ import AddIcon from '@mui/icons-material/Add'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
-import StopIcon from '@mui/icons-material/Stop'
 import axios from 'axios'
 
 const API_BASE = 'http://localhost:8000'
@@ -77,10 +75,41 @@ export default function JobsPage() {
     const [form, setForm] = useState(EMPTY_FORM)
     const [jobProgress, setJobProgress] = useState<Record<string, JobProgress>>({})
     const wsRefs = useRef<Record<string, WebSocket>>({})
+    // Always holds the latest jobProgress so the cleanup closure isn't stale
+    const jobProgressRef = useRef<Record<string, JobProgress>>({})
+
+    useEffect(() => {
+        jobProgressRef.current = jobProgress
+    }, [jobProgress])
 
     useEffect(() => {
         fetchRules()
         fetchTenants()
+        // Restore any jobs that were running when the user navigated away
+        const saved = sessionStorage.getItem('runningJobIds')
+        if (saved) {
+            sessionStorage.removeItem('runningJobIds')
+            const ids: string[] = JSON.parse(saved)
+            ids.forEach(id => {
+                setJobProgress(prev => ({
+                    ...prev,
+                    [id]: prev[id] ?? { percent: 0, step: 'Reconnecting…', status: 'running' },
+                }))
+                openWs(id)
+            })
+        }
+        return () => {
+            // Save running IDs so we can reconnect when the page is visited again
+            const running = Object.entries(jobProgressRef.current)
+                .filter(([, jp]) => jp.status === 'running')
+                .map(([id]) => id)
+            if (running.length > 0) {
+                sessionStorage.setItem('runningJobIds', JSON.stringify(running))
+            }
+            // Close all sockets – they'll be reopened on next mount
+            Object.values(wsRefs.current).forEach(ws => { try { ws.close() } catch { /* ignore */ } })
+            wsRefs.current = {}
+        }
     }, [])
 
     async function fetchRules() {
@@ -175,11 +204,6 @@ export default function JobsPage() {
         setError('')
         setSuccessMsg('')
 
-        if (wsRefs.current[id]) {
-            wsRefs.current[id].close()
-            delete wsRefs.current[id]
-        }
-
         setJobProgress(prev => ({
             ...prev,
             [id]: { percent: 0, step: 'Starting…', status: 'running' },
@@ -193,6 +217,15 @@ export default function JobsPage() {
                 [id]: { percent: 0, step: '', status: 'error', message: e?.response?.data?.detail || e.message },
             }))
             return
+        }
+
+        openWs(id)
+    }
+
+    function openWs(id: string) {
+        if (wsRefs.current[id]) {
+            wsRefs.current[id].close()
+            delete wsRefs.current[id]
         }
 
         const ws = new WebSocket(`${WS_BASE}/jobs/ws/${id}`)
@@ -213,10 +246,16 @@ export default function JobsPage() {
                     }))
                     fetchRules()
                 } else if (msg.type === 'error') {
-                    setJobProgress(prev => ({
-                        ...prev,
-                        [id]: { percent: 0, step: '', status: 'error', message: msg.message },
-                    }))
+                    // "No active job" means the job finished while we were on another page
+                    if (msg.message?.includes('No active job')) {
+                        setJobProgress(prev => { const c = { ...prev }; delete c[id]; return c })
+                        fetchRules()
+                    } else {
+                        setJobProgress(prev => ({
+                            ...prev,
+                            [id]: { percent: 0, step: '', status: 'error', message: msg.message },
+                        }))
+                    }
                 }
             } catch { /* ignore */ }
         }
@@ -331,7 +370,7 @@ export default function JobsPage() {
         {
             field: 'actions',
             headerName: 'Actions',
-            width: 130,
+            width: 320,
             sortable: false,
             filterable: false,
             renderCell: (params: GridRenderCellParams) => {
@@ -339,7 +378,7 @@ export default function JobsPage() {
                 const jp = jobProgress[ruleId]
                 const isRunning = jp?.status === 'running'
                 return (
-                    <Box>
+                    <Stack direction="row" spacing={0.5} alignItems="center" sx={{ py: 0.5 }}>
                         <Tooltip title={isRunning ? 'Running…' : 'Run now'}>
                             <span>
                                 <IconButton
@@ -348,9 +387,7 @@ export default function JobsPage() {
                                     disabled={isRunning}
                                     onClick={() => triggerRule(ruleId)}
                                 >
-                                    {isRunning
-                                        ? <StopIcon fontSize="small" />
-                                        : <PlayArrowIcon fontSize="small" />}
+                                    <PlayArrowIcon fontSize="small" />
                                 </IconButton>
                             </span>
                         </Tooltip>
@@ -364,7 +401,25 @@ export default function JobsPage() {
                                 <DeleteIcon fontSize="small" />
                             </IconButton>
                         </Tooltip>
-                    </Box>
+                        {jp?.status === 'running' && (
+                            <Box sx={{ position: 'relative', display: 'inline-flex' }}>
+                                <CircularProgress variant="determinate" value={jp.percent} size={34} />
+                                <Box sx={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                    <Typography variant="caption" component="div" sx={{ fontSize: '0.58rem', fontWeight: 600 }}>
+                                        {`${jp.percent}%`}
+                                    </Typography>
+                                </Box>
+                            </Box>
+                        )}
+                        {jp?.status === 'done' && (
+                            <Chip size="small" label={`✓ ${jp.processed ?? 0}`} color="success" onDelete={() => dismissProgress(ruleId)} />
+                        )}
+                        {jp?.status === 'error' && (
+                            <Tooltip title={jp.message ?? 'Unknown error'}>
+                                <Chip size="small" label="Error" color="error" onDelete={() => dismissProgress(ruleId)} />
+                            </Tooltip>
+                        )}
+                    </Stack>
                 )
             },
         },
@@ -399,49 +454,10 @@ export default function JobsPage() {
                 columns={columns}
                 autoHeight
                 disableRowSelectionOnClick
-                rowHeight={56}
                 pageSizeOptions={[10, 25, 50]}
                 initialState={{ pagination: { paginationModel: { pageSize: 10 } } }}
                 sx={{ mb: 2 }}
             />
-
-            {/* ── Per-job progress panels ─────────────────────────────── */}
-            {Object.entries(jobProgress).map(([ruleId, jp]) => {
-                const rule = rules.find(r => r.id === ruleId)
-                const label = rule
-                    ? `${rule.rule_type === 'matching' ? 'Matching' : 'Processing'} rule — ${rule.run_time}`
-                    : ruleId
-                return (
-                    <Card key={ruleId} variant="outlined" sx={{ mb: 1 }}>
-                        <CardContent sx={{ py: 1, '&:last-child': { pb: 1 } }}>
-                            <Stack direction="row" justifyContent="space-between" alignItems="center" mb={0.5}>
-                                <Typography variant="subtitle2">
-                                    Running: <strong>{label}</strong>
-                                </Typography>
-                                {jp.status !== 'running' && (
-                                    <Button size="small" onClick={() => dismissProgress(ruleId)}>Dismiss</Button>
-                                )}
-                            </Stack>
-                            {jp.status === 'running' && (
-                                <>
-                                    <LinearProgress variant="determinate" value={jp.percent} sx={{ mb: 0.5 }} />
-                                    <Typography variant="caption" color="text.secondary">
-                                        {jp.step} ({jp.percent}%)
-                                    </Typography>
-                                </>
-                            )}
-                            {jp.status === 'done' && (
-                                <Alert severity="success" sx={{ py: 0 }}>
-                                    Completed — {jp.processed ?? 0} item(s) processed.
-                                </Alert>
-                            )}
-                            {jp.status === 'error' && (
-                                <Alert severity="error" sx={{ py: 0 }}>{jp.message}</Alert>
-                            )}
-                        </CardContent>
-                    </Card>
-                )
-            })}
 
             {/* ── Create / Edit Dialog ──────────────────────────────────── */}
             <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="sm" fullWidth>

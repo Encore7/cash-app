@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql.functions import count
 
 from backend.db.deps import get_db
 from backend.models.bank import BankStatement
-from backend.models.core import BlobObject, IngestionRun, Tenant
+from backend.models.core import IngestionRun, Tenant
 from backend.models.enums import MatchStatus
 from backend.models.journal import JournalEntry
 from backend.models.reconciliation import ReconciliationMatch
-from backend.models.remittance import RemittanceAdviceHeader, RemittanceAdviceLine
+from backend.models.remittance import RemittanceAdviceHeader
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 def get_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
     # Count by match status
     rows = db.execute(
-        select(ReconciliationMatch.status, func.count(ReconciliationMatch.id)).group_by(
+        select(ReconciliationMatch.status, count(ReconciliationMatch.id)).group_by(
             ReconciliationMatch.status
         )
     ).all()
@@ -65,7 +65,7 @@ def get_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
         t_review = 0
         if run_ids:
             t_rows = db.execute(
-                select(ReconciliationMatch.status, func.count(ReconciliationMatch.id))
+                select(ReconciliationMatch.status, count(ReconciliationMatch.id))
                 .where(ReconciliationMatch.run_id.in_(run_ids))
                 .group_by(ReconciliationMatch.status)
             ).all()
@@ -111,6 +111,7 @@ def get_matches(
         .options(
             selectinload(ReconciliationMatch.bank_statement),
             selectinload(ReconciliationMatch.remittance_advice_line),
+            selectinload(ReconciliationMatch.run).selectinload(IngestionRun.tenant),
         )
         .order_by(ReconciliationMatch.created_at.desc())
     )
@@ -122,10 +123,15 @@ def get_matches(
     for m in records:
         bs = m.bank_statement
         ral = m.remittance_advice_line
+        run = m.run
+        tenant = run.tenant if run else None
         result.append(
             {
                 "id": str(m.id),
                 "run_id": str(m.run_id),
+                "tenant_id": str(tenant.id) if tenant else None,
+                "tenant_code": tenant.code if tenant else None,
+                "tenant_name": tenant.name if tenant else None,
                 "status": m.status,
                 "confidence_score": float(m.confidence_score),
                 "match_rule": m.match_rule,

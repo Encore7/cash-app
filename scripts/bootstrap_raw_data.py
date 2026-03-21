@@ -114,9 +114,7 @@ def register_blobs_in_db(
                 .on_conflict_do_nothing(constraint="uq_blob_dedup")
             )
             db.execute(stmt)
-            print(
-                f"  DB registered: {raw_file.local_path.name} as {source_type.value} (is_parsed=False)"
-            )
+            print(f"  DB registered: {raw_file.local_path.name} as {source_type.value}")
 
         db.commit()
     except Exception as exc:
