@@ -811,11 +811,20 @@ export default function AnalyticsPage() {
                                                 data: pieData,
                                                 highlightScope: { fade: 'global', highlight: 'item' },
                                                 innerRadius: 40,
+                                                arcLabel: (item) => `${item.value}`,
+                                                arcLabelMinAngle: 20,
                                             },
                                         ]}
                                         onItemClick={(_e, item) => onPieSliceClick(item.dataIndex)}
                                         height={280}
                                         slotProps={{ legend: { direction: 'horizontal', position: { vertical: 'bottom', horizontal: 'center' } } }}
+                                        sx={{
+                                            '& .MuiChartsArcLabel-root': {
+                                                fill: '#fff',
+                                                fontWeight: 700,
+                                                fontSize: 13,
+                                            },
+                                        }}
                                     />
                                 ) : (
                                     <Typography color='text.secondary'>No match data yet.</Typography>
