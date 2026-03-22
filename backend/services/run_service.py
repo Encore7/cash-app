@@ -847,7 +847,6 @@ def post_journals(
                     or "auto-posted"
                 )
             ),
-            source_file_name=f"run-{run.id}.json",
             reconciliation_match_id=match.id,
             bank_statement_id=bank_row.id,
             remittance_advice_line_id=rem_line.id,
@@ -879,7 +878,6 @@ def post_journals(
             item_text=bank_row.buyer_reference
             or bank_row.bank_reference
             or "unmatched-bank-line",
-            source_file_name=f"run-{run.id}.json",
             bank_statement_id=bank_row.id,
         )
         db.add(entry)

@@ -53,8 +53,6 @@ def upgrade() -> None:
         VALUES
             (gen_random_uuid(), 'acme-corp',        'ACME Corporation',      true, NOW()),
             (gen_random_uuid(), 'delta-logistics',  'Delta Logistics GmbH',  true, NOW()),
-            (gen_random_uuid(), 'nordic-trade',     'Nordic Trade AS',       true, NOW()),
-            (gen_random_uuid(), 'pacific-ventures', 'Pacific Ventures Ltd',  true, NOW()),
             (gen_random_uuid(), 'euro-markets',     'Euro Markets SA',       true, NOW())
         ON CONFLICT (code) DO NOTHING
         """

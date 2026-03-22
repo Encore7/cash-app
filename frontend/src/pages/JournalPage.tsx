@@ -2,11 +2,10 @@ import React, { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import {
     Box,
-    Chip,
     CircularProgress,
     Typography,
 } from '@mui/material'
-import { DataGrid, GridColDef, GridRenderCellParams } from '@mui/x-data-grid'
+import { DataGrid, GridColDef } from '@mui/x-data-grid'
 
 const API = 'http://localhost:8000'
 
@@ -23,7 +22,6 @@ interface JournalEntry {
     credit: number | null
     currency: string
     item_text: string | null
-    source_file_name: string | null
     created_at: string | null
     reconciliation_match_id: string | null
     bank_statement_id: string | null
@@ -68,27 +66,6 @@ export default function JournalPage() {
         },
         { field: 'currency', headerName: 'Ccy', width: 80 },
         { field: 'item_text', headerName: 'Item Text', minWidth: 220, flex: 1, valueGetter: (_v, row) => row.item_text ?? '–' },
-        { field: 'source_file_name', headerName: 'Source File', minWidth: 170, flex: 1, valueGetter: (_v, row) => row.source_file_name ?? '–' },
-        {
-            field: 'links',
-            headerName: 'Links',
-            width: 220,
-            sortable: false,
-            filterable: false,
-            renderCell: (params: GridRenderCellParams<JournalEntry>) => (
-                <Box display='flex' gap={0.5} flexWrap='wrap'>
-                    {params.row.reconciliation_match_id && (
-                        <Chip size='small' label='Match' color='success' variant='outlined' />
-                    )}
-                    {params.row.bank_statement_id && (
-                        <Chip size='small' label='Bank' color='primary' variant='outlined' />
-                    )}
-                    {params.row.remittance_advice_line_id && (
-                        <Chip size='small' label='Rem.' color='secondary' variant='outlined' />
-                    )}
-                </Box>
-            ),
-        },
     ], [])
 
     if (loading) {
@@ -109,8 +86,8 @@ export default function JournalPage() {
                 columns={columns}
                 autoHeight
                 disableRowSelectionOnClick
-                pageSizeOptions={[10, 25, 50]}
-                initialState={{ pagination: { paginationModel: { pageSize: 10 } } }}
+                pageSizeOptions={[10, 20, 50]}
+                initialState={{ pagination: { paginationModel: { pageSize: 20 } } }}
             />
         </Box>
     )

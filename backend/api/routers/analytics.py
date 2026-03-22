@@ -471,7 +471,6 @@ def get_journal_entries(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
             "credit": float(r.credit) if r.credit is not None else None,
             "currency": r.currency,
             "item_text": r.item_text,
-            "source_file_name": r.source_file_name,
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "reconciliation_match_id": (
                 str(r.reconciliation_match_id) if r.reconciliation_match_id else None

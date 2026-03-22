@@ -878,9 +878,9 @@ export default function AnalyticsPage() {
                         columns={matchColumns}
                         autoHeight
                         disableRowSelectionOnClick
-                        pageSizeOptions={[10, 25, 50]}
+                        pageSizeOptions={[10, 20, 50]}
                         initialState={{
-                            pagination: { paginationModel: { pageSize: 10 } },
+                            pagination: { paginationModel: { pageSize: 20 } },
                             columns: {
                                 columnVisibilityModel: {
                                     status_group: false,
@@ -906,8 +906,11 @@ export default function AnalyticsPage() {
                             columns={bankColumns}
                             autoHeight
                             disableRowSelectionOnClick
-                            pageSizeOptions={[10, 25, 50]}
-                            initialState={{ pagination: { paginationModel: { pageSize: 10 } } }}
+                            pageSizeOptions={[10, 20, 50]}
+                            initialState={{
+                                pagination: { paginationModel: { pageSize: 20 } },
+                                sorting: { sortModel: [{ field: 'line_number', sort: 'asc' }] },
+                            }}
                         />
                     )}
 
