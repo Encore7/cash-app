@@ -7,7 +7,7 @@ import {
 } from '@mui/material'
 import { DataGrid, GridColDef } from '@mui/x-data-grid'
 
-const API = 'http://localhost:8000'
+const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 interface JournalEntry {
     id: string

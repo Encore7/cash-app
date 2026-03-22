@@ -35,7 +35,7 @@ import FindInPageIcon from '@mui/icons-material/FindInPage'
 import { DataGrid, GridColDef, GridFilterModel, GridRenderCellParams, GridRowSelectionModel } from '@mui/x-data-grid'
 import { PieChart } from '@mui/x-charts/PieChart'
 
-const API = 'http://localhost:8000'
+const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 interface BuyerSummary {
     buyer_name: string | null
@@ -277,7 +277,7 @@ function EvidenceDialog({ matchId, open, onClose }: EvidenceDialogProps) {
                             />
                             <Chip
                                 size='small'
-                                label={match.status}
+                                label={STATUS_LABELS[match.status] ?? match.status}
                                 color={STATUS_COLORS[match.status] ?? 'default'}
                             />
                             {match.variance_amount != null && match.variance_amount !== 0 && (
@@ -522,6 +522,16 @@ const STATUS_COLORS: Record<string, 'success' | 'error' | 'warning' | 'default'>
     REJECTED: 'error',
 }
 
+const STATUS_LABELS: Record<string, string> = {
+    AUTO_MATCHED: 'Auto Match',
+    APPROVED: 'Match',
+    CLOSED: 'Closed',
+    UNMATCHED: 'Unmatch',
+    MANUAL_REVIEW: 'Manual Review',
+    PARTIAL_MATCH: 'Partial Match',
+    REJECTED: 'Rejected',
+}
+
 function fmt(n: number | null | undefined, currency?: string | null) {
     if (n == null) return '–'
     const s = n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -665,7 +675,7 @@ export default function AnalyticsPage() {
             headerName: 'Status',
             width: 150,
             renderCell: (params: GridRenderCellParams) => (
-                <Chip size='small' label={String(params.value)} color={STATUS_COLORS[String(params.value)] ?? 'default'} />
+                <Chip size='small' label={STATUS_LABELS[String(params.value)] ?? String(params.value)} color={STATUS_COLORS[String(params.value)] ?? 'default'} />
             ),
         },
         {
@@ -748,6 +758,19 @@ export default function AnalyticsPage() {
                         Unmatch
                     </Button>
                 </Box>
+            ),
+        },
+        {
+            field: 'source',
+            headerName: 'Source',
+            width: 120,
+            renderCell: (params: GridRenderCellParams) => (
+                <Chip
+                    size='small'
+                    label={params.row.source === 'RULE' || params.row.source === 'AUTO' ? 'Auto Match' : 'Manual'}
+                    variant='outlined'
+                    color={params.row.source === 'RULE' || params.row.source === 'AUTO' ? 'primary' : 'secondary'}
+                />
             ),
         },
     ], [actionLoading])
