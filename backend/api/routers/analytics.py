@@ -116,7 +116,6 @@ def get_matches(
                     float(m.variance_amount) if m.variance_amount is not None else None
                 ),
                 "notes": m.notes,
-                "source": m.source,
                 "is_selected": m.is_selected,
                 "created_at": m.created_at.isoformat() if m.created_at else None,
                 "reviewed_by": m.reviewed_by,
@@ -346,7 +345,6 @@ def get_match_evidence(
                 if match.variance_amount is not None
                 else None
             ),
-            "source": match.source,
             "is_selected": match.is_selected,
             "notes": match.notes,
             "reviewed_by": match.reviewed_by,

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import {
     Box,
+    Button,
     CircularProgress,
     Typography,
 } from '@mui/material'
@@ -78,9 +79,14 @@ export default function JournalPage() {
 
     return (
         <Box sx={{ p: 3 }}>
-            <Typography variant='h5' gutterBottom>
-                Journal Entries
-            </Typography>
+            <Box display='flex' alignItems='center' justifyContent='space-between' mb={2}>
+                <Typography variant='h5'>
+                    Journal Entries
+                </Typography>
+                <Button variant='contained' disableElevation>
+                    Sync to ERP
+                </Button>
+            </Box>
             <DataGrid
                 rows={entries}
                 columns={columns}

@@ -72,7 +72,7 @@ uv run alembic upgrade head
 
 4. Seed sample files into Azurite:
 ```bash
-uv run python scripts/bootstrap_raw_data.py --tenant bike-team-gmbh --business-date 2026-03-21
+uv run python scripts/bootstrap_raw_data.py --tenant sportcenter-team-gmbh --business-date 2026-03-21
 ```
 
 5. Trigger ingestion (parse + match):

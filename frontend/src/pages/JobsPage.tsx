@@ -338,7 +338,7 @@ export default function JobsPage() {
                 const jp = jobProgress[ruleId]
                 const isRunning = jp?.status === 'running'
                 return (
-                    <Stack direction="row" spacing={0.5} alignItems="center" sx={{ py: 0.5 }}>
+                    <Stack direction="row" spacing={0.5} alignItems="center">
                         <Tooltip title={isRunning ? 'Running…' : 'Run now'}>
                             <span>
                                 <IconButton

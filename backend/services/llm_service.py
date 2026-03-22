@@ -73,9 +73,13 @@ def _build_prompt() -> str:
         'For line items, map the final amount from the German "Zahlbetrag" column to paid_amount. '
         "Ensure arithmetic consistency: sum(lines[].paid_amount) must equal total_paid_amount from payment summary. "
         "If mismatch appears, re-read ambiguous OCR digits (especially 1/7) and correct line values before output. "
-        "buyer_reference is the remittance/avis number or buyer's own reference. "
+        "IMPORTANT: The 'buyer' is the entity that ISSUED this payment advice document and SENT it to us for processing — "
+        "they are the customer/payer settling the invoices. Do NOT extract seller/recipient information for buyer fields. "
+        "buyer_name is the name of the company or person who sent this remittance advice (the payer/customer). "
+        "buyer_reference is the remittance/avis number or the buyer's own internal reference. "
+        "buyer_account_number is the buyer's own Kontonummer/account number (not the seller's). "
+        "payer_iban and payer_bic are the buyer's bank account details (the account from which payment is made). "
         "bank_reference is the bank's payment reference. "
-        "buyer_account_number is the buyer's Kontonummer/account number. "
         "Use this JSON shape: "
         '"buyer_reference":null,"bank_reference":null,"buyer_account_number":null,"advice_date":null,"buyer_name":null,"payer_iban":null,"payer_bic":null,'
         '"currency":null,"total_paid_amount":null,"document_language":"de","remittance_subject":null,'
@@ -291,7 +295,12 @@ def extract_remittance_with_llm(
         try:
             extracted, raw_payload = _extract_via_gemini_pdf_bytes(pdf_bytes)
             return extracted, raw_payload, "llm_pdf", settings.gemini_model
-        except (ValueError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        except (
+            ValueError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+            OSError,
+        ) as exc:
             result = RemittanceExtractionResult(
                 raw_text=raw_text, parsing_confidence=Decimal("0.0"), lines=[]
             )

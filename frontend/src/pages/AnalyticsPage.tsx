@@ -59,7 +59,6 @@ interface Match {
     amount_applied: number | null
     variance_amount: number | null
     notes: string | null
-    source: string
     is_selected: boolean
     created_at: string | null
     bank_booking_date: string | null
@@ -121,7 +120,6 @@ interface EvidenceMatchMeta {
     match_rule: string
     amount_applied: number | null
     variance_amount: number | null
-    source: string
     is_selected: boolean
     notes: string | null
     reviewed_by: string | null
@@ -738,12 +736,12 @@ export default function AnalyticsPage() {
             sortable: false,
             filterable: false,
             renderCell: (params: GridRenderCellParams<Match>) => (
-                <Box display='flex' gap={0.5}>
+                <Box display='flex' gap={2} height='100%' alignItems='center'>
                     <Button
                         size='small'
                         variant='outlined'
                         color='success'
-                        disabled={actionLoading === params.row.id || params.row.status === 'APPROVED'}
+                        disabled={actionLoading === params.row.id || params.row.status === 'APPROVED' || params.row.status === 'AUTO_MATCHED'}
                         onClick={() => handleMarkMatched(params.row.id)}
                     >
                         {actionLoading === params.row.id ? <CircularProgress size={14} /> : 'Match'}
@@ -758,19 +756,6 @@ export default function AnalyticsPage() {
                         Unmatch
                     </Button>
                 </Box>
-            ),
-        },
-        {
-            field: 'source',
-            headerName: 'Source',
-            width: 120,
-            renderCell: (params: GridRenderCellParams) => (
-                <Chip
-                    size='small'
-                    label={params.row.source === 'RULE' || params.row.source === 'AUTO' ? 'Auto Match' : 'Manual'}
-                    variant='outlined'
-                    color={params.row.source === 'RULE' || params.row.source === 'AUTO' ? 'primary' : 'secondary'}
-                />
             ),
         },
     ], [actionLoading])
@@ -901,7 +886,7 @@ export default function AnalyticsPage() {
                                 disabled={selectedMatchIds.ids.size === 0 || bulkActionLoading}
                                 onClick={handleBulkMatch}
                             >
-                                {bulkActionLoading ? <CircularProgress size={14} /> : `Bulk Match (${selectedMatchIds.ids.size})`}
+                                {bulkActionLoading ? <CircularProgress size={14} /> : `Match (${selectedMatchIds.ids.size})`}
                             </Button>
                             <Button
                                 variant='contained'
@@ -910,7 +895,7 @@ export default function AnalyticsPage() {
                                 disabled={selectedMatchIds.ids.size === 0 || bulkActionLoading}
                                 onClick={handleBulkUnmatch}
                             >
-                                {bulkActionLoading ? <CircularProgress size={14} /> : `Bulk Unmatch (${selectedMatchIds.ids.size})`}
+                                {bulkActionLoading ? <CircularProgress size={14} /> : `Unmatch (${selectedMatchIds.ids.size})`}
                             </Button>
                             <Button onClick={clearMatchFilters}>Clear Filters</Button>
                         </Stack>
