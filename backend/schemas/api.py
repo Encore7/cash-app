@@ -89,14 +89,7 @@ class JournalPreviewResponse(BaseModel):
 # ── Job scheduling schemas ────────────────────────────────────────────────────
 
 
-class TenantInRule(BaseModel):
-    id: str
-    code: str
-    name: str
-
-
 class JobRuleCreate(BaseModel):
-    tenant_ids: list[str] = []  # empty = All Tenants
     rule_type: str = "processing"
     frequency: str
     day_of_week: int | None = None
@@ -108,7 +101,6 @@ class JobRuleCreate(BaseModel):
 class JobRuleResponse(BaseModel):
     id: str
     rule_type: str
-    tenants: list[TenantInRule] = []
     frequency: str
     day_of_week: int | None = None
     day_of_month: int | None = None
@@ -116,10 +108,3 @@ class JobRuleResponse(BaseModel):
     is_active: bool
     created_at: datetime
     last_triggered_at: datetime | None = None
-
-
-class TenantResponse(BaseModel):
-    id: str
-    code: str
-    name: str
-    is_active: bool

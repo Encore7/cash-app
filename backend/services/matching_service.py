@@ -116,6 +116,7 @@ def match_bank_to_remittance(
 
     for bank in bank_rows:
         bank_amount = abs(bank["amount"])
+        bank_currency = _norm(bank.get("currency"))
         local_candidates: list[dict] = []
 
         # ── Step 1: Score every header and pick the best candidate ───────────
@@ -128,13 +129,31 @@ def match_bank_to_remittance(
                 continue
             header_lines = lines_by_header.get(str(header["id"]), [])
             total_paid = header.get("total_paid_amount")
+            header_currency = _norm(header.get("currency"))
 
-            if total_paid is not None and abs(abs(total_paid) - bank_amount) <= Decimal(
-                "0.02"
+            # Currency must match (permissive when either side is unknown)
+            currency_ok = (
+                not bank_currency
+                or not header_currency
+                or bank_currency == header_currency
+            )
+
+            if (
+                currency_ok
+                and total_paid is not None
+                and abs(abs(total_paid) - bank_amount) <= Decimal("0.02")
             ):
                 attempts.append((rc, 2, header, header_lines))
             else:
-                combo = _find_line_combination(header_lines, bank_amount)
+                # Only include lines whose currency matches
+                currency_matched_lines = [
+                    ln
+                    for ln in header_lines
+                    if not bank_currency
+                    or not _norm(ln.get("currency"))
+                    or _norm(ln.get("currency")) == bank_currency
+                ]
+                combo = _find_line_combination(currency_matched_lines, bank_amount)
                 if combo is not None:
                     attempts.append((rc, 1, header, combo))
                 else:
@@ -214,6 +233,14 @@ def match_bank_to_remittance(
                     line_bref = _norm(line.get("buyer_reference"))
                     bank_bref = _norm(bank.get("buyer_reference"))
                     if line_bref and bank_bref and line_bref == bank_bref:
+                        # Currency check (permissive when either side is unknown)
+                        line_currency = _norm(line.get("currency"))
+                        if (
+                            bank_currency
+                            and line_currency
+                            and bank_currency != line_currency
+                        ):
+                            continue
                         paid = line.get("paid_amount")
                         variance = (
                             bank_amount - abs(paid) if paid is not None else bank_amount
@@ -394,10 +421,9 @@ def generate_match_candidates(
                         "status": MatchStatus.MANUAL_REVIEW,
                         "source": "RULE",
                     }
-                    if (
-                        best_partial is None
-                        or cand["variance_amount"] < best_partial["variance_amount"]
-                    ):
+                    if best_partial is None:
+                        best_partial = cand
+                    elif cand["variance_amount"] < best_partial["variance_amount"]:
                         best_partial = cand
             if best_partial:
                 local_candidates.append(best_partial)

@@ -28,7 +28,7 @@ class RemittanceExtractionResult(BaseModel):
     buyer_name: str | None = None
     payer_iban: str | None = None
     payer_bic: str | None = None
-    document_currency: str | None = None
+    currency: str | None = None
     total_paid_amount: Decimal | None = None
     document_language: str = "de"
     remittance_subject: str | None = None

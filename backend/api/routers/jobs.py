@@ -8,17 +8,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from backend.db.deps import get_db
-from backend.models.core import JobScheduleRule, JobScheduleRuleTenant, Tenant
+from backend.models.core import JobScheduleRule
 from backend.models.enums import ScheduleFrequency
-from backend.schemas.api import (
-    JobRuleCreate,
-    JobRuleResponse,
-    TenantInRule,
-    TenantResponse,
-)
+from backend.schemas.api import JobRuleCreate, JobRuleResponse
 
 # Active job progress queues — keyed by rule_id string
 _active_jobs: dict[str, _queue_module.SimpleQueue] = {}
@@ -29,19 +24,9 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
 def _rule_to_response(rule: JobScheduleRule) -> JobRuleResponse:
-    tenants = [
-        TenantInRule(
-            id=str(rt.tenant.id),
-            code=rt.tenant.code,
-            name=rt.tenant.name,
-        )
-        for rt in rule.rule_tenants
-        if rt.tenant is not None
-    ]
     return JobRuleResponse(
         id=str(rule.id),
         rule_type=rule.rule_type,
-        tenants=tenants,
         frequency=rule.frequency.value,
         day_of_week=rule.day_of_week,
         day_of_month=rule.day_of_month,
@@ -53,56 +38,16 @@ def _rule_to_response(rule: JobScheduleRule) -> JobRuleResponse:
 
 
 def _load_rule(db: Session, rule_id: UUID) -> JobScheduleRule:
-    rule = db.scalar(
-        select(JobScheduleRule)
-        .options(
-            selectinload(JobScheduleRule.rule_tenants).selectinload(
-                JobScheduleRuleTenant.tenant
-            )
-        )
-        .where(JobScheduleRule.id == rule_id)
-    )
+    rule = db.get(JobScheduleRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
     return rule
 
 
-def _set_rule_tenants(
-    db: Session, rule: JobScheduleRule, tenant_ids: list[str]
-) -> None:
-    for rt in list(rule.rule_tenants):
-        db.delete(rt)
-    db.flush()
-    rule.rule_tenants = []
-    for tid_str in tenant_ids:
-        try:
-            tid = UUID(tid_str)
-        except ValueError:
-            continue
-        if db.get(Tenant, tid):
-            db.add(JobScheduleRuleTenant(rule_id=rule.id, tenant_id=tid))
-    db.flush()
-
-
-@router.get("/tenants", response_model=list[TenantResponse])
-def list_tenants(db: Session = Depends(get_db)) -> list[TenantResponse]:
-    tenants = db.scalars(select(Tenant).order_by(Tenant.name)).all()
-    return [
-        TenantResponse(id=str(t.id), code=t.code, name=t.name, is_active=t.is_active)
-        for t in tenants
-    ]
-
-
 @router.get("/rules", response_model=list[JobRuleResponse])
 def list_rules(db: Session = Depends(get_db)) -> list[JobRuleResponse]:
     rules = db.scalars(
-        select(JobScheduleRule)
-        .options(
-            selectinload(JobScheduleRule.rule_tenants).selectinload(
-                JobScheduleRuleTenant.tenant
-            )
-        )
-        .order_by(JobScheduleRule.created_at.desc())
+        select(JobScheduleRule).order_by(JobScheduleRule.created_at.desc())
     ).all()
     return [_rule_to_response(r) for r in rules]
 
@@ -135,14 +80,6 @@ def create_rule(
     db.add(rule)
     db.flush()
 
-    for tid_str in payload.tenant_ids:
-        try:
-            tid = UUID(tid_str)
-        except ValueError:
-            continue
-        if db.get(Tenant, tid):
-            db.add(JobScheduleRuleTenant(rule_id=rule.id, tenant_id=tid))
-
     db.commit()
     rule = _load_rule(db, rule.id)
     return _rule_to_response(rule)
@@ -171,7 +108,6 @@ def update_rule(
     rule.run_time = payload.run_time
     rule.is_active = payload.is_active
 
-    _set_rule_tenants(db, rule, payload.tenant_ids)
     db.commit()
     return _rule_to_response(_load_rule(db, rule_id))
 

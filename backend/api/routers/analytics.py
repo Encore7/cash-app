@@ -8,6 +8,7 @@ from uuid import UUID
 from azure.storage.blob import BlobServiceClient
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql.functions import count
@@ -15,7 +16,7 @@ from sqlalchemy.sql.functions import count
 from backend.config import settings
 from backend.db.deps import get_db
 from backend.models.bank import BankStatement
-from backend.models.core import BlobObject, IngestionRun, Tenant
+from backend.models.core import BlobObject
 from backend.models.enums import MatchStatus
 from backend.models.journal import JournalEntry
 from backend.models.reconciliation import ReconciliationMatch
@@ -56,47 +57,22 @@ def get_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
     unmatched = sum(status_counts.get(s, 0) for s in unmatched_statuses)
     manual_review = sum(status_counts.get(s, 0) for s in review_statuses)
 
-    # Per-tenant breakdown via blob_objects → ingestion_runs → reconciliation_matches
-    tenants = db.scalars(select(Tenant).order_by(Tenant.name)).all()
-    tenant_details = []
-    for tenant in tenants:
-        # get run ids for tenant
-        run_ids = db.scalars(
-            select(IngestionRun.id).where(IngestionRun.tenant_id == tenant.id)
-        ).all()
-        t_matched = 0
-        t_unmatched = 0
-        t_review = 0
-        if run_ids:
-            t_rows = db.execute(
-                select(ReconciliationMatch.status, count(ReconciliationMatch.id))
-                .where(ReconciliationMatch.run_id.in_(run_ids))
-                .group_by(ReconciliationMatch.status)
-            ).all()
-            t_counts: dict[str, int] = {r[0]: r[1] for r in t_rows}
-            t_matched = sum(t_counts.get(s, 0) for s in matched_statuses)
-            t_unmatched = sum(t_counts.get(s, 0) for s in unmatched_statuses)
-            t_review = sum(t_counts.get(s, 0) for s in review_statuses)
-
-        tenant_details.append(
-            {
-                "id": str(tenant.id),
-                "code": tenant.code,
-                "name": tenant.name,
-                "is_active": tenant.is_active,
-                "matched": t_matched,
-                "unmatched": t_unmatched,
-                "manual_review": t_review,
-                "total": t_matched + t_unmatched + t_review,
-            }
-        )
+    # Per-buyer breakdown: count remittance_advice_headers grouped by buyer_name
+    buyer_rows = db.execute(
+        select(RemittanceAdviceHeader.buyer_name, count(RemittanceAdviceHeader.id))
+        .group_by(RemittanceAdviceHeader.buyer_name)
+        .order_by(RemittanceAdviceHeader.buyer_name)
+    ).all()
+    buyers = [
+        {"buyer_name": row[0], "remittance_doc_count": row[1]} for row in buyer_rows
+    ]
 
     return {
         "matched": matched,
         "unmatched": unmatched,
         "manual_review": manual_review,
         "total": matched + unmatched + manual_review,
-        "tenants": tenant_details,
+        "buyers": buyers,
     }
 
 
@@ -115,7 +91,6 @@ def get_matches(
         .options(
             selectinload(ReconciliationMatch.bank_statement),
             selectinload(ReconciliationMatch.remittance_advice_line),
-            selectinload(ReconciliationMatch.run).selectinload(IngestionRun.tenant),
         )
         .order_by(ReconciliationMatch.created_at.desc())
     )
@@ -127,15 +102,10 @@ def get_matches(
     for m in records:
         bs = m.bank_statement
         ral = m.remittance_advice_line
-        run = m.run
-        tenant = run.tenant if run else None
         result.append(
             {
                 "id": str(m.id),
                 "run_id": str(m.run_id),
-                "tenant_id": str(tenant.id) if tenant else None,
-                "tenant_code": tenant.code if tenant else None,
-                "tenant_name": tenant.name if tenant else None,
                 "status": m.status,
                 "confidence_score": float(m.confidence_score),
                 "match_rule": m.match_rule,
@@ -225,7 +195,7 @@ def get_remittance_headers(db: Session = Depends(get_db)) -> list[dict[str, Any]
                 "buyer_account_number": h.buyer_account_number,
                 "advice_date": h.advice_date.isoformat() if h.advice_date else None,
                 "buyer_name": h.buyer_name,
-                "document_currency": h.document_currency,
+                "currency": h.currency,
                 "total_paid_amount": (
                     float(h.total_paid_amount)
                     if h.total_paid_amount is not None
@@ -285,6 +255,49 @@ def mark_unmatched(
     match.reviewed_at = datetime.utcnow()
     db.commit()
     return {"id": str(match.id), "status": match.status}
+
+
+# ---------------------------------------------------------------------------
+# Bulk match / unmatch
+# ---------------------------------------------------------------------------
+
+
+class BulkActionRequest(BaseModel):
+    ids: list[UUID]
+
+
+@router.post("/matches/bulk-match")
+def bulk_match(
+    body: BulkActionRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    now = datetime.utcnow()
+    updated = 0
+    for match_id in body.ids:
+        match = db.get(ReconciliationMatch, match_id)
+        if match:
+            match.status = MatchStatus.APPROVED
+            match.reviewed_at = now
+            updated += 1
+    db.commit()
+    return {"updated": updated}
+
+
+@router.post("/matches/bulk-unmatch")
+def bulk_unmatch(
+    body: BulkActionRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    now = datetime.utcnow()
+    updated = 0
+    for match_id in body.ids:
+        match = db.get(ReconciliationMatch, match_id)
+        if match:
+            match.status = MatchStatus.UNMATCHED
+            match.reviewed_at = now
+            updated += 1
+    db.commit()
+    return {"updated": updated}
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +400,7 @@ def get_match_evidence(
                 "buyer_account_number": rah.buyer_account_number,
                 "advice_date": rah.advice_date.isoformat() if rah.advice_date else None,
                 "buyer_name": rah.buyer_name,
-                "document_currency": rah.document_currency,
+                "currency": rah.currency,
                 "total_paid_amount": (
                     float(rah.total_paid_amount)
                     if rah.total_paid_amount is not None

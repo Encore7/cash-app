@@ -32,20 +32,14 @@ import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp'
 import DownloadIcon from '@mui/icons-material/Download'
 import FindInPageIcon from '@mui/icons-material/FindInPage'
-import { DataGrid, GridColDef, GridFilterModel, GridRenderCellParams } from '@mui/x-data-grid'
+import { DataGrid, GridColDef, GridFilterModel, GridRenderCellParams, GridRowSelectionModel } from '@mui/x-data-grid'
 import { PieChart } from '@mui/x-charts/PieChart'
 
 const API = 'http://localhost:8000'
 
-interface TenantSummary {
-    id: string
-    code: string
-    name: string
-    is_active: boolean
-    matched: number
-    unmatched: number
-    manual_review: number
-    total: number
+interface BuyerSummary {
+    buyer_name: string | null
+    remittance_doc_count: number
 }
 
 interface Summary {
@@ -53,15 +47,12 @@ interface Summary {
     unmatched: number
     manual_review: number
     total: number
-    tenants: TenantSummary[]
+    buyers: BuyerSummary[]
 }
 
 interface Match {
     id: string
     run_id: string
-    tenant_id: string | null
-    tenant_code: string | null
-    tenant_name: string | null
     status: string
     confidence_score: number
     match_rule: string
@@ -114,7 +105,7 @@ interface RemittanceHeader {
     buyer_account_number: string | null
     advice_date: string | null
     buyer_name: string | null
-    document_currency: string | null
+    currency: string | null
     total_paid_amount: number | null
     lines: RemittanceLine[]
 }
@@ -172,7 +163,7 @@ interface EvidenceRemittanceHeader {
     buyer_account_number: string | null
     advice_date: string | null
     buyer_name: string | null
-    document_currency: string | null
+    currency: string | null
     total_paid_amount: number | null
     source_file_name: string | null
 }
@@ -352,7 +343,7 @@ function EvidenceDialog({ matchId, open, onClose }: EvidenceDialogProps) {
                                         <FieldRow label='Advice Date' value={rah.advice_date} />
                                         <FieldRow
                                             label='Total Paid'
-                                            value={fmt(rah.total_paid_amount, rah.document_currency)}
+                                            value={fmt(rah.total_paid_amount, rah.currency)}
                                             highlight={
                                                 rah.total_paid_amount != null &&
                                                 bs != null &&
@@ -552,12 +543,14 @@ export default function AnalyticsPage() {
     const [activeTab, setActiveTab] = useState(0)
     const [docTab, setDocTab] = useState(0)
     const [matchFilterGroup, setMatchFilterGroup] = useState<string | null>(null)
-    const [selectedTenantName, setSelectedTenantName] = useState<string | null>(null)
+    const [selectedBuyerName, setSelectedBuyerName] = useState<string | null>(null)
     const [matchFilterModel, setMatchFilterModel] = useState<GridFilterModel>({ items: [] })
     const [expandedHeaderId, setExpandedHeaderId] = useState<string | null>(null)
 
     const [loading, setLoading] = useState(true)
     const [actionLoading, setActionLoading] = useState<string | null>(null)
+    const [bulkActionLoading, setBulkActionLoading] = useState(false)
+    const [selectedMatchIds, setSelectedMatchIds] = useState<GridRowSelectionModel>({ type: 'include', ids: new Set() })
     const [evidenceOpen, setEvidenceOpen] = useState(false)
     const [evidenceMatchId, setEvidenceMatchId] = useState<string | null>(null)
 
@@ -599,6 +592,30 @@ export default function AnalyticsPage() {
         }
     }
 
+    const handleBulkMatch = async () => {
+        setBulkActionLoading(true)
+        try {
+            const ids = Array.from(selectedMatchIds.ids).map(String)
+            await axios.post(`${API}/analytics/matches/bulk-match`, { ids })
+            setSelectedMatchIds({ type: 'include', ids: new Set() })
+            await loadData()
+        } finally {
+            setBulkActionLoading(false)
+        }
+    }
+
+    const handleBulkUnmatch = async () => {
+        setBulkActionLoading(true)
+        try {
+            const ids = Array.from(selectedMatchIds.ids).map(String)
+            await axios.post(`${API}/analytics/matches/bulk-unmatch`, { ids })
+            setSelectedMatchIds({ type: 'include', ids: new Set() })
+            await loadData()
+        } finally {
+            setBulkActionLoading(false)
+        }
+    }
+
     const pieData = summary
         ? [
             { id: 0, value: summary.matched, label: 'Matched', color: '#4caf50' },
@@ -607,7 +624,7 @@ export default function AnalyticsPage() {
         ]
         : []
 
-    function applyMatchGridFilter(group: string | null, tenantName: string | null) {
+    function applyMatchGridFilter(group: string | null) {
         const items: GridFilterModel['items'] = []
 
         if (group) {
@@ -616,14 +633,6 @@ export default function AnalyticsPage() {
                 field: 'status_group',
                 operator: 'equals',
                 value: group,
-            })
-        }
-        if (tenantName) {
-            items.push({
-                id: 2,
-                field: 'tenant_name',
-                operator: 'contains',
-                value: tenantName,
             })
         }
 
@@ -636,19 +645,12 @@ export default function AnalyticsPage() {
         const next = matchFilterGroup === clicked ? null : clicked
         setMatchFilterGroup(next)
         setActiveTab(2)
-        applyMatchGridFilter(next, selectedTenantName)
-    }
-
-    function onTenantClick(tenant: TenantSummary) {
-        const next = selectedTenantName === tenant.name ? null : tenant.name
-        setSelectedTenantName(next)
-        setActiveTab(2)
-        applyMatchGridFilter(matchFilterGroup, next)
+        applyMatchGridFilter(next)
     }
 
     function clearMatchFilters() {
         setMatchFilterGroup(null)
-        setSelectedTenantName(null)
+        setSelectedBuyerName(null)
         setMatchFilterModel({ items: [] })
     }
 
@@ -658,12 +660,6 @@ export default function AnalyticsPage() {
     )
 
     const matchColumns = useMemo<GridColDef[]>(() => [
-        {
-            field: 'tenant_name',
-            headerName: 'Tenant',
-            width: 170,
-            valueGetter: (_v, r) => r.tenant_name ?? '–',
-        },
         {
             field: 'status',
             headerName: 'Status',
@@ -683,7 +679,9 @@ export default function AnalyticsPage() {
             field: 'confidence_score',
             headerName: 'Confidence',
             width: 120,
-            valueGetter: (_value, row) => `${(row.confidence_score * 100).toFixed(1)}%`,
+            type: 'number',
+            valueGetter: (_value, row) => row.confidence_score * 100,
+            valueFormatter: (value: number | null) => value != null ? `${value.toFixed(1)}%` : '–',
         },
         { field: 'bank_booking_date', headerName: 'Bank Date', width: 120, valueGetter: (_v, r) => r.bank_booking_date ?? '–' },
         {
@@ -828,38 +826,31 @@ export default function AnalyticsPage() {
 
                     <Grid size={{ xs: 12, md: 6 }}>
                         <Typography variant='h6' gutterBottom>
-                            Tenant Breakdown
+                            Buyer Activity
                         </Typography>
                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                            {summary?.tenants.map((t) => {
-                                const selected = selectedTenantName === t.name
-                                return (
-                                    <Card
-                                        key={t.id}
-                                        variant={selected ? 'elevation' : 'outlined'}
-                                        onClick={() => onTenantClick(t)}
-                                        sx={{ cursor: 'pointer' }}
-                                    >
-                                        <CardContent sx={{ py: 1, '&:last-child': { pb: 1 } }}>
-                                            <Box display='flex' justifyContent='space-between' alignItems='center'>
-                                                <Box>
-                                                    <Typography variant='subtitle1'>{t.name}</Typography>
-                                                    <Typography variant='caption' color='text.secondary'>
-                                                        {t.code} · {t.is_active ? 'Active' : 'Inactive'}
-                                                    </Typography>
-                                                </Box>
-                                                <Box display='flex' gap={1}>
-                                                    <Chip size='small' label={`✓ ${t.matched}`} color='success' variant='outlined' />
-                                                    <Chip size='small' label={`✗ ${t.unmatched}`} color='error' variant='outlined' />
-                                                    <Chip size='small' label={`~ ${t.manual_review}`} color='warning' variant='outlined' />
-                                                </Box>
-                                            </Box>
-                                        </CardContent>
-                                    </Card>
-                                )
-                            })}
-                            {!summary?.tenants.length && (
-                                <Typography color='text.secondary'>No tenants found.</Typography>
+                            {summary?.buyers.map((b) => (
+                                <Card
+                                    key={b.buyer_name ?? '__unknown__'}
+                                    variant={selectedBuyerName === b.buyer_name ? 'elevation' : 'outlined'}
+                                >
+                                    <CardContent sx={{ py: 1, '&:last-child': { pb: 1 } }}>
+                                        <Box display='flex' justifyContent='space-between' alignItems='center'>
+                                            <Typography variant='subtitle1'>
+                                                {b.buyer_name ?? 'Unknown Buyer'}
+                                            </Typography>
+                                            <Chip
+                                                size='small'
+                                                label={`${b.remittance_doc_count} doc${b.remittance_doc_count !== 1 ? 's' : ''}`}
+                                                color='primary'
+                                                variant='outlined'
+                                            />
+                                        </Box>
+                                    </CardContent>
+                                </Card>
+                            ))}
+                            {!summary?.buyers.length && (
+                                <Typography color='text.secondary'>No buyer data found.</Typography>
                             )}
                         </Box>
                     </Grid>
@@ -870,14 +861,34 @@ export default function AnalyticsPage() {
                 <>
                     <Stack direction='row' justifyContent='space-between' alignItems='center' mb={1}>
                         <Typography variant='h6'>Reconciliation Matches</Typography>
-                        <Button onClick={clearMatchFilters}>Clear Filters</Button>
+                        <Stack direction='row' gap={1}>
+                            <Button
+                                variant='contained'
+                                color='success'
+                                size='small'
+                                disabled={selectedMatchIds.ids.size === 0 || bulkActionLoading}
+                                onClick={handleBulkMatch}
+                            >
+                                {bulkActionLoading ? <CircularProgress size={14} /> : `Bulk Match (${selectedMatchIds.ids.size})`}
+                            </Button>
+                            <Button
+                                variant='contained'
+                                color='error'
+                                size='small'
+                                disabled={selectedMatchIds.ids.size === 0 || bulkActionLoading}
+                                onClick={handleBulkUnmatch}
+                            >
+                                {bulkActionLoading ? <CircularProgress size={14} /> : `Bulk Unmatch (${selectedMatchIds.ids.size})`}
+                            </Button>
+                            <Button onClick={clearMatchFilters}>Clear Filters</Button>
+                        </Stack>
                     </Stack>
 
                     <DataGrid
                         rows={matchRows}
                         columns={matchColumns}
                         autoHeight
-                        disableRowSelectionOnClick
+                        checkboxSelection
                         pageSizeOptions={[10, 20, 50]}
                         initialState={{
                             pagination: { paginationModel: { pageSize: 20 } },
@@ -889,6 +900,8 @@ export default function AnalyticsPage() {
                         }}
                         filterModel={matchFilterModel}
                         onFilterModelChange={setMatchFilterModel}
+                        rowSelectionModel={selectedMatchIds}
+                        onRowSelectionModelChange={setSelectedMatchIds}
                     />
                 </>
             )}
@@ -947,7 +960,7 @@ export default function AnalyticsPage() {
                                                     <TableCell>{hdr.buyer_reference ?? '–'}</TableCell>
                                                     <TableCell>{hdr.advice_date ?? '–'}</TableCell>
                                                     <TableCell>{hdr.buyer_name ?? '–'}</TableCell>
-                                                    <TableCell>{fmt(hdr.total_paid_amount, hdr.document_currency)}</TableCell>
+                                                    <TableCell>{fmt(hdr.total_paid_amount, hdr.currency)}</TableCell>
                                                     <TableCell>{Array.isArray(hdr.lines) ? hdr.lines.length : 0}</TableCell>
                                                 </TableRow>
                                                 <TableRow>

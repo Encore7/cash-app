@@ -147,25 +147,3 @@ class JobScheduleRule(Base):
     last_triggered_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-
-    rule_tenants: Mapped[list["JobScheduleRuleTenant"]] = relationship(
-        back_populates="rule", cascade="all, delete-orphan"
-    )
-
-
-class JobScheduleRuleTenant(Base):
-    __tablename__ = "job_schedule_rule_tenants"
-
-    rule_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("job_schedule_rules.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-
-    rule: Mapped[JobScheduleRule] = relationship(back_populates="rule_tenants")
-    tenant: Mapped[Tenant] = relationship()

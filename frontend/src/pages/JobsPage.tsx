@@ -3,7 +3,6 @@ import {
     Alert,
     Box,
     Button,
-    Checkbox,
     Chip,
     CircularProgress,
     Dialog,
@@ -15,9 +14,7 @@ import {
     IconButton,
     InputLabel,
     LinearProgress,
-    ListItemText,
     MenuItem,
-    OutlinedInput,
     Select,
     Stack,
     Switch,
@@ -44,10 +41,7 @@ const DAYS_OF_WEEK = [
     'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
 ]
 
-const ALL_TENANTS_SENTINEL = '__all__'
-
 const EMPTY_FORM = {
-    tenant_ids: [] as string[],
     rule_type: 'processing',
     frequency: 'daily',
     day_of_week: 0,
@@ -66,7 +60,6 @@ interface JobProgress {
 
 export default function JobsPage() {
     const [rules, setRules] = useState<any[]>([])
-    const [tenants, setTenants] = useState<any[]>([])
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState('')
     const [successMsg, setSuccessMsg] = useState('')
@@ -87,7 +80,6 @@ export default function JobsPage() {
     useEffect(() => {
         mountedRef.current = true
         fetchRules()
-        fetchTenants()
         // Restore any jobs that were running when the user navigated away
         const saved = sessionStorage.getItem('runningJobIds')
         const savedProgress = sessionStorage.getItem('runningJobProgress')
@@ -122,22 +114,14 @@ export default function JobsPage() {
 
     async function fetchRules() {
         setLoading(true)
+        setError('')
         try {
-            const { data } = await api.get('/jobs/rules')
-            setRules(data)
+            const res = await api.get('/jobs/rules')
+            setRules(res.data)
         } catch (e: any) {
-            setError(e?.response?.data?.detail || e.message)
+            setError(e?.response?.data?.detail ?? 'Failed to load rules')
         } finally {
             setLoading(false)
-        }
-    }
-
-    async function fetchTenants() {
-        try {
-            const { data } = await api.get('/jobs/tenants')
-            setTenants(data)
-        } catch {
-            // ignore
         }
     }
 
@@ -150,7 +134,6 @@ export default function JobsPage() {
     function openEdit(rule: any) {
         setEditingRule(rule)
         setForm({
-            tenant_ids: (rule.tenants ?? []).map((t: any) => t.id),
             rule_type: rule.rule_type ?? 'processing',
             frequency: rule.frequency,
             day_of_week: rule.day_of_week ?? 0,
@@ -161,21 +144,8 @@ export default function JobsPage() {
         setDialogOpen(true)
     }
 
-    function handleTenantChange(newValue: string[]) {
-        const allSelected = newValue.includes(ALL_TENANTS_SENTINEL)
-        const wasAllTenants = form.tenant_ids.length === 0
-        if (allSelected && wasAllTenants) {
-            setForm({ ...form, tenant_ids: newValue.filter(v => v !== ALL_TENANTS_SENTINEL) })
-        } else if (allSelected && !wasAllTenants) {
-            setForm({ ...form, tenant_ids: [] })
-        } else {
-            setForm({ ...form, tenant_ids: newValue.filter(v => v !== ALL_TENANTS_SENTINEL) })
-        }
-    }
-
     async function saveRule() {
         const payload = {
-            tenant_ids: form.tenant_ids,
             rule_type: form.rule_type,
             frequency: form.frequency,
             day_of_week: form.frequency === 'weekly' ? form.day_of_week : null,
@@ -305,8 +275,6 @@ export default function JobsPage() {
         return '—'
     }
 
-    const selectValue = form.tenant_ids.length === 0 ? [ALL_TENANTS_SENTINEL] : form.tenant_ids
-
     // ── DataGrid column definitions ─────────────────────────────────────────
     const columns: GridColDef[] = [
         {
@@ -320,24 +288,6 @@ export default function JobsPage() {
                     color={params.value === 'matching' ? 'secondary' : 'info'}
                 />
             ),
-        },
-        {
-            field: 'tenants',
-            headerName: 'Tenants',
-            flex: 1,
-            minWidth: 160,
-            renderCell: (params: GridRenderCellParams) => {
-                const list: any[] = params.value ?? []
-                return list.length > 0 ? (
-                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, py: 0.5 }}>
-                        {list.map((t: any) => (
-                            <Chip key={t.id} label={t.name} size="small" variant="outlined" />
-                        ))}
-                    </Box>
-                ) : (
-                    <Chip label="All Tenants" size="small" color="default" />
-                )
-            },
         },
         {
             field: 'frequency',
@@ -484,41 +434,6 @@ export default function JobsPage() {
                             >
                                 <MenuItem value="processing">Processing</MenuItem>
                                 <MenuItem value="matching">Matching</MenuItem>
-                            </Select>
-                        </FormControl>
-
-                        <FormControl fullWidth>
-                            <InputLabel>Tenants</InputLabel>
-                            <Select
-                                multiple
-                                label="Tenants"
-                                value={selectValue}
-                                onChange={(e) => handleTenantChange(e.target.value as string[])}
-                                input={<OutlinedInput label="Tenants" />}
-                                renderValue={(selected) => {
-                                    if ((selected as string[]).includes(ALL_TENANTS_SENTINEL)) {
-                                        return <Chip size="small" label="All Tenants" />
-                                    }
-                                    return (
-                                        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                                            {(selected as string[]).map((id) => {
-                                                const t = tenants.find((x) => x.id === id)
-                                                return <Chip key={id} size="small" label={t?.name ?? id} />
-                                            })}
-                                        </Box>
-                                    )
-                                }}
-                            >
-                                <MenuItem value={ALL_TENANTS_SENTINEL}>
-                                    <Checkbox checked={form.tenant_ids.length === 0} />
-                                    <ListItemText primary="All Tenants" />
-                                </MenuItem>
-                                {tenants.map((t) => (
-                                    <MenuItem key={t.id} value={t.id}>
-                                        <Checkbox checked={form.tenant_ids.includes(t.id)} />
-                                        <ListItemText primary={t.name} secondary={t.code} />
-                                    </MenuItem>
-                                ))}
                             </Select>
                         </FormControl>
 

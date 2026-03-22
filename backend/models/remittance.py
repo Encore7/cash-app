@@ -31,7 +31,7 @@ class RemittanceAdviceHeader(Base):
     buyer_account_number: Mapped[str | None] = mapped_column(String(34))
     advice_date: Mapped[date | None] = mapped_column(Date)
     buyer_name: Mapped[str | None] = mapped_column(String(255))
-    document_currency: Mapped[str | None] = mapped_column(String(3))
+    currency: Mapped[str | None] = mapped_column(String(3))
     total_paid_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
 
     source_blob: Mapped[BlobObject] = relationship(

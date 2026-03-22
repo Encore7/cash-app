@@ -46,31 +46,8 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("rule_id", "tenant_id"),
     )
 
-    # 4. Seed dummy tenants (idempotent)
-    op.execute(
-        """
-        INSERT INTO tenants (id, code, name, is_active, created_at)
-        VALUES
-            (gen_random_uuid(), 'acme-corp',        'ACME Corporation',      true, NOW()),
-            (gen_random_uuid(), 'delta-logistics',  'Delta Logistics GmbH',  true, NOW()),
-            (gen_random_uuid(), 'euro-markets',     'Euro Markets SA',       true, NOW())
-        ON CONFLICT (code) DO NOTHING
-        """
-    )
-
 
 def downgrade() -> None:
-    # Remove dummy tenants
-    op.execute(
-        """
-        DELETE FROM tenants
-        WHERE code IN (
-            'acme-corp', 'delta-logistics', 'nordic-trade',
-            'pacific-ventures', 'euro-markets'
-        )
-        """
-    )
-
     op.drop_table("job_schedule_rule_tenants")
 
     op.add_column(

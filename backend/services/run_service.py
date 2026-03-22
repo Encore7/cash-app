@@ -187,7 +187,7 @@ def _persist_remittance_data(
         buyer_account_number=normalized.buyer_account_number,
         advice_date=normalized.advice_date,
         buyer_name=normalized.buyer_name,
-        document_currency=normalized.document_currency,
+        currency=normalized.currency,
         total_paid_amount=normalized.total_paid_amount,
     )
     db.add(header)
@@ -242,6 +242,7 @@ def _persist_matches(
         {
             "id": str(row.id),
             "amount": row.amount,
+            "currency": row.currency,
             "bank_reference": row.bank_reference,
             "buyer_reference": row.buyer_reference,
             "buyer_account_number": row.buyer_account_number,
@@ -255,6 +256,7 @@ def _persist_matches(
             "bank_reference": h.bank_reference,
             "buyer_reference": h.buyer_reference,
             "buyer_account_number": h.buyer_account_number,
+            "currency": h.currency,
             "total_paid_amount": h.total_paid_amount,
         }
         for h in headers
@@ -265,6 +267,7 @@ def _persist_matches(
                 "id": str(line.id),
                 "invoice_number": line.invoice_number,
                 "paid_amount": line.paid_amount,
+                "currency": line.currency,
                 "buyer_reference": line.buyer_reference,
             }
             for line in rem_lines

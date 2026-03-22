@@ -87,7 +87,7 @@ export default function JournalPage() {
                 autoHeight
                 disableRowSelectionOnClick
                 pageSizeOptions={[10, 20, 50]}
-                initialState={{ pagination: { paginationModel: { pageSize: 20 } } }}
+                initialState={{ pagination: { paginationModel: { pageSize: 20 } }, sorting: { sortModel: [{ field: 'line_number', sort: 'asc' }] } }}
             />
         </Box>
     )

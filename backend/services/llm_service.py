@@ -57,7 +57,7 @@ def _heuristic_extract(text: str) -> RemittanceExtractionResult:
         remittance_subject="Heuristic extraction fallback",
         raw_text=text,
         parsing_confidence=Decimal("0.55") if lines else Decimal("0.20"),
-        document_currency="EUR",
+        currency="EUR",
         total_paid_amount=total,
         lines=lines,
     )
@@ -78,7 +78,7 @@ def _build_prompt() -> str:
         "buyer_account_number is the buyer's Kontonummer/account number. "
         "Use this JSON shape: "
         '"buyer_reference":null,"bank_reference":null,"buyer_account_number":null,"advice_date":null,"buyer_name":null,"payer_iban":null,"payer_bic":null,'
-        '"document_currency":null,"total_paid_amount":null,"document_language":"de","remittance_subject":null,'
+        '"currency":null,"total_paid_amount":null,"document_language":"de","remittance_subject":null,'
         '"raw_text":null,"parsing_confidence":0.0,'
         '"lines":[{"line_number":1,"invoice_number":null,"invoice_date":null,"due_date":null,"gross_amount":null,'
         '"discount_amount":null,"deduction_amount":null,"paid_amount":null,"currency":null,"buyer_reference":null,'

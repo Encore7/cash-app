@@ -109,7 +109,7 @@ def validate_remittance_result(
     normalized = result.model_copy(deep=True)
     for line in normalized.lines:
         if line.currency is None:
-            line.currency = normalized.document_currency or "EUR"
+            line.currency = normalized.currency or "EUR"
 
     return RemittanceValidationReport(
         is_valid=not reasons,

@@ -9,11 +9,10 @@ from datetime import UTC, date, datetime
 from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient
 from sqlalchemy import select, text
-from sqlalchemy.orm import selectinload
 
 from backend.config import settings
 from backend.db.session import SessionLocal
-from backend.models.core import JobScheduleRule, JobScheduleRuleTenant, Tenant
+from backend.models.core import JobScheduleRule
 from backend.models.enums import ScheduleFrequency
 from backend.services.run_service import ServiceError, ingest_run
 
@@ -154,13 +153,7 @@ def _check_and_run_rules(now: datetime) -> int:
     processed = 0
     try:
         rules = db.scalars(
-            select(JobScheduleRule)
-            .options(
-                selectinload(JobScheduleRule.rule_tenants).selectinload(
-                    JobScheduleRuleTenant.tenant
-                )
-            )
-            .where(JobScheduleRule.is_active.is_(True))
+            select(JobScheduleRule).where(JobScheduleRule.is_active.is_(True))
         ).all()
 
         for rule in rules:
@@ -173,8 +166,8 @@ def _check_and_run_rules(now: datetime) -> int:
                 db.commit()
                 continue
 
-            # PROCESSING rule – discover blobs for configured tenants (or all)
-            tenant_codes = [rt.tenant.code for rt in rule.rule_tenants if rt.tenant]
+            # PROCESSING rule – discover blobs for all tenants
+            tenant_codes: list[str] = []
             if tenant_codes:
                 all_items: list[tuple[str, date]] = []
                 for code in tenant_codes:
@@ -229,19 +222,15 @@ def run_for_rule_with_progress(rule_id: str, progress_cb) -> tuple[int, list[dic
     db = SessionLocal()
     try:
         rule = db.scalar(
-            select(JobScheduleRule)
-            .options(
-                selectinload(JobScheduleRule.rule_tenants).selectinload(
-                    JobScheduleRuleTenant.tenant
-                )
+            select(JobScheduleRule).where(
+                JobScheduleRule.id == _uuid.UUID(str(rule_id))
             )
-            .where(JobScheduleRule.id == _uuid.UUID(str(rule_id)))
         )
         if not rule:
             _emit({"type": "error", "message": "Rule not found"})
             return 0, []
 
-        tenant_codes = [rt.tenant.code for rt in rule.rule_tenants if rt.tenant]
+        tenant_codes: list[str] = []
 
         # ── MATCHING rule ─────────────────────────────────────────────────────
         if rule.rule_type == "matching":
